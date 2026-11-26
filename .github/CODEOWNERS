@@ -1,0 +1,14 @@
+/.github/ @rustburn @ivories
+/.cargo/ @rustburn @ivories
+/vendor/ @rustburn @ivories
+/contracts/ @rustburn @ivories
+/supply-chain/ @rustburn @ivories
+**/Cargo.toml @rustburn @ivories
+/deny.toml @rustburn @ivories
+/clippy.toml @rustburn @ivories
+/rustfmt.toml @rustburn @ivories
+/rust-toolchain @rustburn @ivories
+/rust-toolchain.toml @rustburn @ivories
+/unsafe-crates.txt @rustburn @ivories
+/build.rs @rustburn @ivories
+**/build.rs @rustburn @ivories
