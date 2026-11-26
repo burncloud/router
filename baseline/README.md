@@ -5,8 +5,8 @@
 ## 怎么跑
 
 ```
-./run_twice.sh              # debug 构建，全新 SQLite 各跑一次，比较两次结果，写 results/run1.json、run2.json、diff.txt
-./run_twice.sh --perf 200   # release 构建，跑 perf 探针，写 results/perf-release.json
+bash run_twice.sh           # debug 构建，全新 SQLite 各跑一次，比较两次结果，写 results/run1.json、run2.json、diff.txt
+bash run_twice.sh --perf 200   # release 构建，跑 perf 探针，写 results/perf-release.json
 python3 compare.py A.json B.json   # 只比较 compared 段，一致时退出码 0
 ```
 
