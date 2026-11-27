@@ -1,3 +1,4 @@
 /harness/target/
 /harness/old/
-/results/*.router.log
+/tool/target/
+/results/

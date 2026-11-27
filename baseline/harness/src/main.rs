@@ -2,7 +2,7 @@
 //!
 //! 用旧仓库生产服务挂载的同一个入口 `burncloud_router::create_router_app`，对进程内脚本化假上游回放固定场景，
 //! 记录状态码、规范化响应体、金额变化、`router_logs` 行、`WARN`/`ERROR` 日志和耗时。
-//! 夹具是旧仓库 `crates/traffic/router/tests/common.rs`，由 `run_twice.sh` 从 Cargo 按钉死 rev 检出的源码复制到 `old/`，不入库。
+//! 夹具是旧仓库 `crates/traffic/router/tests/common.rs`，由 `baseline-tool` 从 Cargo 按钉死 rev 检出的源码复制到 `old/`，不入库。
 //!
 //! 用法：`old-relay-baseline <out.json> <raw.log>`，需要环境变量 `OLD_COMMIT`（40 位 SHA）。
 
@@ -25,7 +25,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::ExitCode;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -55,13 +55,14 @@ const FAIL_CH: i32 = 9103;
 const OK_FAILOVER_CH: i32 = 9104;
 const SCHEDULER_POLICIES: &str = r#"{"default":{"type":"passthrough"}}"#;
 const RATE_LIMIT_REQUESTS: usize = 140;
-const PRICED_MODELS: [&str; 6] = [
+const PRICED_MODELS: [&str; 7] = [
     "gpt-baseline",
     "gpt-nousage",
     "gpt-failover",
     "claude-baseline",
     "gemini-baseline",
     "gpt-ratelimit",
+    "gpt-long",
 ];
 
 struct Scn {
@@ -72,6 +73,7 @@ struct Scn {
     path: &'static str,
     auth: (&'static str, String),
     body: Value,
+    disconnect_after_first_chunk: bool,
 }
 
 struct Ctx {
@@ -139,8 +141,8 @@ fn failover_session() -> anyhow::Result<String> {
         .context("no failover session")
 }
 
-fn scenarios(session: &str) -> Vec<Scn> {
-    let main = |name, expected_diff, body| Scn {
+fn main_scenario(name: &'static str, expected_diff: Option<&'static str>, body: Value) -> Scn {
+    Scn {
         name,
         expected_diff,
         user: MAIN_USER,
@@ -148,8 +150,13 @@ fn scenarios(session: &str) -> Vec<Scn> {
         path: "/v1/chat/completions",
         auth: bearer(MAIN_KEY),
         body,
-    };
-    vec![
+        disconnect_after_first_chunk: false,
+    }
+}
+
+fn scenarios(session: &str) -> Vec<Scn> {
+    let main = main_scenario;
+    let mut all = vec![
         main("openai_nonstream_ok", None, chat("gpt-baseline", false)),
         main(
             "openai_stream_ok",
@@ -164,6 +171,7 @@ fn scenarios(session: &str) -> Vec<Scn> {
             path: "/v1/messages",
             auth: ("x-api-key", MAIN_KEY.into()),
             body: json!({"model": "claude-baseline", "max_tokens": 64, "messages": [{"role": "user", "content": "baseline ping"}]}),
+            disconnect_after_first_chunk: false,
         },
         Scn {
             name: "gemini_generate_ok",
@@ -173,6 +181,7 @@ fn scenarios(session: &str) -> Vec<Scn> {
             path: "/v1beta/models/gemini-baseline:generateContent",
             auth: ("x-goog-api-key", MAIN_KEY.into()),
             body: json!({"contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}]}),
+            disconnect_after_first_chunk: false,
         },
         Scn {
             name: "insufficient_key_quota",
@@ -182,6 +191,7 @@ fn scenarios(session: &str) -> Vec<Scn> {
             path: "/v1/chat/completions",
             auth: bearer(BROKE_KEY),
             body: chat("gpt-baseline", false),
+            disconnect_after_first_chunk: false,
         },
         Scn {
             name: "wallet_balance_zero_unlimited_key",
@@ -191,6 +201,7 @@ fn scenarios(session: &str) -> Vec<Scn> {
             path: "/v1/chat/completions",
             auth: bearer(WALLET0_KEY),
             body: chat("gpt-baseline", false),
+            disconnect_after_first_chunk: false,
         },
         main(
             "no_price_model",
@@ -199,12 +210,12 @@ fn scenarios(session: &str) -> Vec<Scn> {
         ),
         main(
             "openai_nonstream_no_usage",
-            Some("预期不同：旧系统 200 且记 0、cost_status 为空；新系统缺 usage 不得记 0（释放冻结或按规则拒绝，记 usage_missing）"),
+            Some("预期不同：旧系统 200 且记 0、cost_status 为空；新系统缺 usage 不得记 0：冻结保留，最多 30 分钟后由对账按上游账单补扣或释放，发 UsageUnreadable"),
             chat("gpt-nousage", false),
         ),
         main(
             "openai_stream_no_usage",
-            Some("预期不同：旧系统 200 且记 0；新系统缺 usage 不得记 0"),
+            Some("预期不同：旧系统 200 且记 0；新系统缺 usage 不得记 0：冻结保留，最多 30 分钟后由对账按上游账单补扣或释放，发 UsageUnreadable"),
             chat("gpt-nousage", true),
         ),
         main(
@@ -212,6 +223,41 @@ fn scenarios(session: &str) -> Vec<Scn> {
             None,
             json!({"model": "gpt-failover", "conversation_id": session, "messages": [{"role": "user", "content": "baseline ping"}]}),
         ),
+    ];
+    all.extend(stream_scenarios());
+    all
+}
+
+fn stream_scenarios() -> Vec<Scn> {
+    vec![
+        Scn {
+            name: "anthropic_messages_stream",
+            expected_diff: Some("预期不同：和 OpenAI 流式同一个问题，旧系统 200 但记 0（usage 在 message_start/message_delta 里，没读到）；新系统按流末 usage 结算"),
+            user: MAIN_USER,
+            key: MAIN_KEY,
+            path: "/v1/messages",
+            auth: ("x-api-key", MAIN_KEY.into()),
+            body: json!({"model": "claude-baseline", "max_tokens": 64, "stream": true, "messages": [{"role": "user", "content": "baseline ping"}]}),
+            disconnect_after_first_chunk: false,
+        },
+        Scn {
+            name: "gemini_stream_generate",
+            expected_diff: Some("预期不同：旧系统转发时丢了 ?alt=sse 且按 body.stream 判断流式，上游回 JSON 数组后质量检查失败，502 不收费；新系统应 200 SSE 并按 usageMetadata 结算（需真实上游样本确认）"),
+            user: MAIN_USER,
+            key: MAIN_KEY,
+            path: "/v1beta/models/gemini-baseline:streamGenerateContent?alt=sse",
+            auth: ("x-goog-api-key", MAIN_KEY.into()),
+            body: json!({"contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}]}),
+            disconnect_after_first_chunk: false,
+        },
+        Scn {
+            disconnect_after_first_chunk: true,
+            ..main_scenario(
+                "openai_stream_client_disconnect",
+                Some("预期不同：旧系统客户端断开后也断开上游、记 0；新系统继续读完上游按实际用量结算，没有用量就保留冻结并发事件（已定，最终以真实上游样本确认）"),
+                chat("gpt-long", true),
+            )
+        },
     ]
 }
 
@@ -279,6 +325,7 @@ async fn seed(
         (9106, "gemini", base("gemini"), "gemini-baseline", 24),
         (9107, "openai-noprice", base("openai"), "gpt-noprice", 1),
         (9108, "openai-rl", base("openai"), "gpt-ratelimit", 1),
+        (9109, "openai-long", base("openai-long"), "gpt-long", 1),
     ];
     for (id, name, url, model, ty) in &channels {
         common::insert_test_channel(pool, *id, name, url, UPSTREAM_KEY, model, "default").await?;
@@ -304,10 +351,7 @@ async fn seed(
 async fn run_scenario(ctx: &Ctx, s: Scn) -> anyhow::Result<(Value, Value)> {
     tracing::info!("=== BASELINE SCENARIO {} ===", s.name);
     ctx.logbuf.take();
-    ctx.hits
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    ctx.hits.clear();
     let before = snapshot(&ctx.pool, s.user, s.key).await?;
     let log_id = max_log_id(&ctx.pool).await?;
     let t0 = Instant::now();
@@ -334,24 +378,33 @@ async fn run_scenario(ctx: &Ctx, s: Scn) -> anyhow::Result<(Value, Value)> {
             ttfb = Some(t0.elapsed().as_secs_f64() * 1000.0);
         }
         raw.extend_from_slice(&c);
+        if s.disconnect_after_first_chunk {
+            break;
+        }
     }
+    drop(stream);
     let total = t0.elapsed().as_secs_f64() * 1000.0;
+    if s.disconnect_after_first_chunk {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
     settle_wait(&ctx.pool, s.user, s.key).await?;
     let after = snapshot(&ctx.pool, s.user, s.key).await?;
     let rows = logs_after(&ctx.pool, log_id, &ctx.ports).await?;
     let lines = ctx.logbuf.take();
     let raw = String::from_utf8_lossy(&raw);
-    let hits = ctx
-        .hits
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let hits = ctx.hits.hits();
+    let body = if s.disconnect_after_first_chunk {
+        json!("<client disconnected after first chunk>")
+    } else {
+        norm_body(&raw, &ctx.ports)
+    };
     let result = json!({
         "name": s.name,
         "expected_diff": s.expected_diff,
         "request": {"path": s.path, "auth_header": s.auth.0, "body": norm_json(&s.body, &ctx.ports)},
-        "response": {"status": status, "content_type": ctype, "body": norm_body(&raw, &ctx.ports)},
+        "response": {"status": status, "content_type": ctype, "body": body},
         "upstream_hits": hits,
+        "upstream_streams_completed": ctx.hits.completed(),
         "money_delta_nano": before.delta(&after),
         "router_logs": rows,
         "warn_error_logs": ctx.warn_error(&lines),
@@ -473,7 +526,7 @@ async fn perf(ctx: &Ctx, n: usize) -> anyhow::Result<Map<String, Value>> {
 
 fn old_commit() -> anyhow::Result<String> {
     let commit =
-        std::env::var("OLD_COMMIT").context("OLD_COMMIT 未设置，请用 run_twice.sh 运行")?;
+        std::env::var("OLD_COMMIT").context("OLD_COMMIT 未设置，请用 baseline-tool 运行")?;
     anyhow::ensure!(
         commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
         "OLD_COMMIT 必须是 40 位十六进制 SHA：{commit}"
@@ -605,11 +658,11 @@ mod tests {
     }
 
     #[test]
-    fn ten_scenarios_with_unique_names() {
+    fn thirteen_scenarios_with_unique_names() {
         let s = scenarios("s");
         let mut names: Vec<_> = s.iter().map(|x| x.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 13);
     }
 }
