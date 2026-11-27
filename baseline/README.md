@@ -65,7 +65,7 @@ SSE 每个事件单独一块，块之间间隔 20 ms。假上游记录每条流�
 
 ## 确定性
 
-连跑两次，`compared` 段 1104 行完全一致（补录 3 个场景后；补录前是 826 行）。三轮 run-twice 都是这个结果。release 构建跑出的 `compared` 段和 debug 构建也完全一致。
+连跑两次，`compared` 段 1104 行完全一致（补录 3 个场景后；补录前是 826 行）。三轮 run-twice 都是这个结果。release 构建跑出的 `compared` 段和 debug 构建也完全一致。之后只按已定的计费规则改过 `expected_diff` 的说明文字，录到的旧行为没有变。
 
 ## perf 基线（release 构建，n=200，box 上单次测量，`perf 200`）
 
@@ -88,18 +88,22 @@ SSE 每个事件单独一块，块之间间隔 20 ms。假上游记录每条流�
 8. **上游路径。** OpenAI 渠道转发时会去掉客户端路径里的 `/v1`（base_url 应该自带 /v1）；Anthropic 和 Gemini 会保留完整路径。
 9. **Anthropic 流式也扣 0。** 200、事件原样转发，但 tokens=0、cost=0，和第 1 条同因。
 10. **Gemini 原生流式不可用。** 客户端按官方写法请求 `:streamGenerateContent?alt=sse`（body 里没有 `stream`），旧 router 转发时丢掉了 `alt=sse`，又按 `body.stream` 判断为非流式；上游回 JSON 数组后质量检查报 `No tokens found in Gemini response`，返回 502 `All upstreams failed`，不扣费，日志记 upstream_error。
-11. **客户端中途断开。** 读到第一块就断开：旧 router 随之断开上游（30 块的上游流没被读完），扣 0，日志一行 200、cost 0。
+11. **客户端中途断开。** 读到第一块就断开：旧 router 随之断开上游（30 块的上游流没被读完），扣 0，日志一行 200、cost 0。对比：旧系统扣 0；新系统按已定的产品规则，客户端断开后继续读完上游，按真实用量结算（上游自己中断、没有用量时释放冻结、不扣）。
 
 ## 没覆盖或受限的部分
 
 - Postgres、旧代码默认调度策略、完整 server 二进制（旧中转没有上过生产，没有生产环境可比）。
 
+## 已用真实上游确认的部分
+
+- **OpenAI 流式 usage**：请求带 `stream_options.include_usage` 时，usage 在 `[DONE]` 前最后一个 `choices: []` 事件里，前面的事件带 `"usage": null`；不加时整条流没有 usage。非流式的 usage 和流末数值一致。
+- **OpenAI 客户端断开**：初步实测中途断开未按完整回答计费（用量后台的最终数字还没复查）。新系统的规则已定，不依赖这个结论：客户端断开后继续读完上游，按真实用量结算；上游自己中断、没有用量时释放冻结、不扣。
+- **Gemini 流式**：`alt=sse`、不带 `alt` 和非流式都录过。`alt=sse` 的事件分隔符是 `\r\n\r\n`；每块都带 usageMetadata，数值累计，末块等于非流式。
+
 ## 需要真实上游样本才能定的部分
 
 假上游的响应格式是按官方文档写的，下面几点必须用真实上游各录一次（脱敏后存成样本，喂给假上游回放）才能当验收依据：
 
-1. **OpenAI 流式**：请求里加 `stream_options.include_usage` 后，末块 usage 的真实形状；以及上游在不加时确实不回 usage（旧中转没有上过生产，没有生产日志可查，以本基线为准）。
-2. **Anthropic 流式**：message_start / message_delta 中 usage 的真实字段，含 cache 相关 token 字段。
-3. **Gemini 流式**：`alt=sse` 与不带 `alt` 两种回复的真实形状；usageMetadata 是每块累计还是只在末块。
-4. **客户端断开**：上游在连接被关时是否仍按完整输出计费（决定新系统断开后应读完上游结算，还是按已收到的部分结算）。
-5. **故障转移、限流在默认调度策略和 Postgres 下的行为**：本基线只在 SQLite + passthrough 策略下测过。旧中转没有上过生产，没有生产调度配置，改用旧代码默认策略加 Postgres 测试库，不需要真实上游。
+1. **Anthropic 流式**：message_start / message_delta 中 usage 的真实字段，含 cache 相关 token 字段；以及中途断开时上游怎么计费。
+2. **Gemini**：中途断开时上游怎么计费；usageMetadata 里 thoughts、cached 相关字段（已录样本里没有出现）。
+3. **故障转移、限流在默认调度策略和 Postgres 下的行为**：本基线只在 SQLite + passthrough 策略下测过。旧中转没有上过生产，没有生产调度配置，改用旧代码默认策略加 Postgres 测试库，不需要真实上游。

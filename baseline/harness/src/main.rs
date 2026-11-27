@@ -242,7 +242,7 @@ fn stream_scenarios() -> Vec<Scn> {
         },
         Scn {
             name: "gemini_stream_generate",
-            expected_diff: Some("预期不同：旧系统转发时丢了 ?alt=sse 且按 body.stream 判断流式，上游回 JSON 数组后质量检查失败，502 不收费；新系统应 200 SSE 并按 usageMetadata 结算（需真实上游样本确认）"),
+            expected_diff: Some("预期不同：旧系统转发时丢了 ?alt=sse 且按 body.stream 判断流式，上游回 JSON 数组后质量检查失败，502 不收费；新系统应 200 SSE 并按 usageMetadata 结算（真实 Gemini 已录：每块都带 usageMetadata，数值累计，末块等于非流式；仍待定的只有断连计费和 thoughts/cached 字段）"),
             user: MAIN_USER,
             key: MAIN_KEY,
             path: "/v1beta/models/gemini-baseline:streamGenerateContent?alt=sse",
@@ -254,7 +254,7 @@ fn stream_scenarios() -> Vec<Scn> {
             disconnect_after_first_chunk: true,
             ..main_scenario(
                 "openai_stream_client_disconnect",
-                Some("预期不同：旧系统客户端断开后也断开上游、记 0；新系统继续读完上游按实际用量结算，没有用量就保留冻结并发事件（已定，最终以真实上游样本确认）"),
+                Some("预期不同：旧系统客户端断开后也断开上游、记 0；新系统继续读完上游按实际用量结算，上游自己中断、没有用量时释放冻结、不扣。初步实测 OpenAI 对中途断开未按完整回答计费，读完则按完整回答计费，所以新系统读完并按真实用量收费是有意的产品规则"),
                 chat("gpt-long", true),
             )
         },
