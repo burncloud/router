@@ -52,7 +52,9 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 
 客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障。重试时拿到 `AlreadySettled`（`settle`）或 `AlreadyReleased`（`release`）说明前一次其实已成功，按成功处理，不报故障。已经调过上游后不会因为内部错误去 `release`。
 
-每个进入上游调用的请求，在结局确定时记一次已决：按用量结算、释放冻结、读不出用量而挂起，都算。只有正常结束但读不出用量、冻结保持挂起的那次同时记入读不出。计数挂在 `RelayGateway` 上，从创建起累加，不按时间滑动，告警也不把计数清零。`GatewayConfig::unreadable_threshold` 默认是 `UnreadableThreshold::DEFAULT`：至少 100 次已决，且 `unreadable / decided` 大于等于 1/100。比较是 `unreadable * ratio_den >= decided * ratio_num`，两侧用 `u128`，不用浮点。`UnreadableThreshold::new` 在窗口为 0、分母为 0 或分子大于分母时返回错误。比例从低于阈值变成达到阈值时调用一次 `Report::usage_unreadable_ratio`，字段是 `decided`、`unreadable`、`window`、`ratio_num`、`ratio_den`、`at`。一直处于达到状态不重复调用；跌回阈值以下之后再次达到会再调用。边沿和计数在同一把锁里更新。
+`hold` 返回存储错误时，先报 `Stage::Hold`，再按同样的 `settle_attempts` 和 `retry_delay` 补一次 `release`，然后向客户端返回 `GatewayError::Storage`，不调用上游。这次释放把 `HoldNotFound` 和 `AlreadyReleased` 当成成功，第一次遇到也不报 `Release` 故障。其它拒绝，以及重试用尽后仍是存储失败，报 `Release` 故障。补偿释放的结果不改变返回给客户端的错误。
+
+每个进入上游调用的请求，在结局确定时记一次已决：按用量结算、释放冻结、读不出用量而挂起，都算。只有正常结束但读不出用量、冻结保持挂起的那次同时记入读不出。`hold` 的存储错误发生在调用上游之前，不增加已决次数，也不记 `UsageUnreadable`。计数挂在 `RelayGateway` 上，从创建起累加，不按时间滑动，告警也不把计数清零。`GatewayConfig::unreadable_threshold` 默认是 `UnreadableThreshold::DEFAULT`：至少 100 次已决，且 `unreadable / decided` 大于等于 1/100。比较是 `unreadable * ratio_den >= decided * ratio_num`，两侧用 `u128`，不用浮点。`UnreadableThreshold::new` 在窗口为 0、分母为 0 或分子大于分母时返回错误。比例从低于阈值变成达到阈值时调用一次 `Report::usage_unreadable_ratio`，字段是 `decided`、`unreadable`、`window`、`ratio_num`、`ratio_den`、`at`。一直处于达到状态不重复调用；跌回阈值以下之后再次达到会再调用。边沿和计数在同一把锁里更新。
 
 IO 依赖和 `relay-openai` 由 `crates/relay-gateway/bans.toml` 和清单测试禁止。
 

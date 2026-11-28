@@ -204,7 +204,7 @@ async fn settle<S: Services>(
         Stage::Settle,
         principal,
         request,
-        BillingRejection::AlreadySettled,
+        Accepted::OnRetry(BillingRejection::AlreadySettled),
         || wallet.settle(&principal.account, request, amount),
     )
     .await;
@@ -217,10 +217,45 @@ async fn release<S: Services>(services: &S, principal: &Principal, request: &Req
         Stage::Release,
         principal,
         request,
-        BillingRejection::AlreadyReleased,
+        Accepted::OnRetry(BillingRejection::AlreadyReleased),
         || wallet.release(&principal.account, request),
     )
     .await;
+}
+
+pub(crate) async fn release_unconfirmed<S: Services>(
+    services: &S,
+    principal: &Principal,
+    request: &RequestId,
+) {
+    let wallet = services.wallet();
+    retry(
+        services,
+        Stage::Release,
+        principal,
+        request,
+        Accepted::UnconfirmedHold,
+        || wallet.release(&principal.account, request),
+    )
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum Accepted {
+    OnRetry(BillingRejection),
+    UnconfirmedHold,
+}
+
+impl Accepted {
+    fn accepts(self, attempts: u32, rejection: BillingRejection) -> bool {
+        match self {
+            Self::OnRetry(done) => attempts > 1 && rejection == done,
+            Self::UnconfirmedHold => matches!(
+                rejection,
+                BillingRejection::HoldNotFound | BillingRejection::AlreadyReleased
+            ),
+        }
+    }
 }
 
 async fn retry<S, F, Fut, E>(
@@ -228,7 +263,7 @@ async fn retry<S, F, Fut, E>(
     stage: Stage,
     principal: &Principal,
     request: &RequestId,
-    done: BillingRejection,
+    accepted: Accepted,
     mut attempt: F,
 ) where
     S: Services,
@@ -241,7 +276,9 @@ async fn retry<S, F, Fut, E>(
     loop {
         match attempt().await {
             Ok(()) => return,
-            Err(WalletError::Rejected(rejection)) if attempts > 1 && rejection == done => return,
+            Err(WalletError::Rejected(rejection)) if accepted.accepts(attempts, rejection) => {
+                return;
+            }
             Err(WalletError::Rejected(rejection)) => {
                 fault(services, stage, principal, request, attempts, &rejection);
                 return;
