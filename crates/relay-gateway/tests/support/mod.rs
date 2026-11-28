@@ -585,6 +585,8 @@ pub struct LedgerWallet {
     pub release_faults: AtomicU32,
     pub release_lost_acks: AtomicU32,
     pub hold_fault: AtomicBool,
+    pub hold_lost_acks: AtomicU32,
+    pub release_rejection: Mutex<Option<BillingRejection>>,
     pub settle_calls: AtomicUsize,
     pub release_calls: AtomicUsize,
     pub caps: Mutex<Vec<Option<KeyCap>>>,
@@ -783,6 +785,9 @@ impl Wallet for LedgerWallet {
                 amount.minor_units,
                 at,
             );
+            if take_fault(&self.hold_lost_acks) {
+                return Err(WalletError::Storage(StoreDown));
+            }
             Ok(())
         })();
         ready(result)
@@ -877,6 +882,9 @@ impl Wallet for LedgerWallet {
         self.release_calls.fetch_add(1, Ordering::SeqCst);
         let at = self.clock.load(Ordering::SeqCst);
         let result = (|| {
+            if let Some(rejection) = lock(&self.release_rejection).take() {
+                return Err(WalletError::Rejected(rejection));
+            }
             if take_fault(&self.release_faults) {
                 return Err(WalletError::Storage(StoreDown));
             }

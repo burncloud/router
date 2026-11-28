@@ -20,7 +20,7 @@ use crate::error::GatewayError;
 use crate::period::since;
 use crate::ports::{Fault, PriceSource, Report, RequestIds, Spawn, Stage};
 use crate::ratio::{UnreadableThreshold, Watch};
-use crate::task::{relay, Job};
+use crate::task::{relay, release_unconfirmed, Job};
 
 /// `Idempotency-Key` 的最大字节数。
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
@@ -230,6 +230,7 @@ impl<S: Services> Gateway for RelayGateway<S> {
                 return Err(failure);
             }
             self.fault(Stage::Hold, Some(&principal), &error);
+            release_unconfirmed(services, &principal, &request).await;
             return Err(GatewayError::Storage);
         }
         let (sender, mut receiver) = channel(services.config().channel_capacity);
