@@ -1,5 +1,3 @@
-use std::cell::OnceCell;
-
 use billing::model::TokenUsage;
 use router::ports::UsageMeter;
 use serde_json::Value;
@@ -23,19 +21,13 @@ enum Mode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct WholeBody {
     bytes: Vec<u8>,
-    complete: OnceCell<bool>,
+    complete: bool,
 }
 
 impl WholeBody {
     fn push(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
-        self.complete = OnceCell::new();
-    }
-
-    fn complete(&self) -> bool {
-        *self
-            .complete
-            .get_or_init(|| serde_json::from_slice::<serde::de::IgnoredAny>(&self.bytes).is_ok())
+        self.complete = serde_json::from_slice::<serde::de::IgnoredAny>(&self.bytes).is_ok();
     }
 }
 
@@ -126,7 +118,7 @@ impl UsageMeter for OpenAiMeter {
     fn ended(&self) -> bool {
         match &self.mode {
             Mode::Stream(state) => state.done,
-            Mode::Whole(body) => body.complete(),
+            Mode::Whole(body) => body.complete,
         }
     }
 
@@ -140,3 +132,11 @@ impl UsageMeter for OpenAiMeter {
         }
     }
 }
+
+const _: () = {
+    const fn assert_auto_traits<
+        T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe,
+    >() {
+    }
+    assert_auto_traits::<OpenAiMeter>();
+};
