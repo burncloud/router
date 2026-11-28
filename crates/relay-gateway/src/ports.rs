@@ -74,9 +74,22 @@ pub struct MeterFailed {
     pub at: UnixMillis,
 }
 
-/// 首期写结构化日志：`usage_unreadable`、`settlement_capped`、`meter_failed` 和 `fault` 记 error 级。
+/// 已决请求中读不出用量的比例从低于阈值升到达到阈值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UsageUnreadableRatio {
+    pub decided: u64,
+    pub unreadable: u64,
+    pub window: u64,
+    pub ratio_num: u64,
+    pub ratio_den: u64,
+    pub at: UnixMillis,
+}
+
+/// 首期由实现方写结构化日志：`usage_unreadable`、`usage_unreadable_ratio`、`settlement_capped`、`meter_failed` 和 `fault`。本 crate 不写日志。
 pub trait Report: Send + Sync + 'static {
     fn usage_unreadable(&self, event: &UsageUnreadable);
+
+    fn usage_unreadable_ratio(&self, event: &UsageUnreadableRatio);
 
     fn settlement_capped(&self, event: &SettlementCapped, shortfall: Shortfall);
 
