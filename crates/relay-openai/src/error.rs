@@ -68,4 +68,6 @@ pub enum MeterError {
     UnsupportedBillingItem(&'static str),
     #[error("response body is not complete JSON")]
     IncompleteBody,
+    #[error("response body or stream buffer exceeded the size limit")]
+    BufferLimitExceeded,
 }

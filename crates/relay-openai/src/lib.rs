@@ -7,6 +7,9 @@ mod meter;
 mod sse;
 mod usage;
 
+/// 非流式响应体、以及流式 SSE 单行和单个事件 data 的缓冲上限（字节）。
+pub const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 pub use adapter::{ModelLimit, OpenAiChat};
 pub use error::{ConfigError, MeterError, PrepareError};
 pub use meter::OpenAiMeter;

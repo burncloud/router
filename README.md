@@ -27,6 +27,7 @@ BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/ne
 
 - 流式按 SSE 行在字节层面跨块切分，`\n` 和 `\r\n` 都认，不做有损解码。`"usage": null` 跳过，出现两次非空 usage、`[DONE]` 之后还有数据、上游的 error 事件、响应里 `service_tier` 不是 `default`，都返回错误。读到 `data: [DONE]` 加空行后 `ended()` 为真。
 - 非流式读完整个响应体后取顶层 `usage`，响应体是完整 JSON 时 `ended()` 为真。`feed` 只累积字节，`ended()` 每次调用都解析整个响应体，所以调用方只能在上游读完后调一次，`relay-gateway` 就是这样做的。
+- 非流式响应体、流式 SSE 单行和单个事件 data 各有同一上限 `MAX_BUFFER_BYTES`（16 MiB）。超过时 `feed` 返回 `BufferLimitExceeded`，已缓冲的字节被丢弃，不会截断后再解析，之后的字节也不再累积；此时 `ended()` 为真，上游读完后按用量读不出处理。转发给客户端的响应体不受此上限影响。
 - 用量字段集合固定：`prompt_tokens`、`completion_tokens`、`total_tokens`、`prompt_tokens_details.{cached_tokens,audio_tokens}`、`completion_tokens_details.{reasoning_tokens,audio_tokens,accepted_prediction_tokens,rejected_prediction_tokens}`。缺字段、多字段、不是 u64、`total_tokens` 不等于两项之和、缓存数大于输入、推理数大于输出、audio 或 prediction 不为 0，都返回错误，不按 0 处理。
 - 换算：`input_tokens = prompt_tokens - cached_tokens`，`cached_input_tokens = cached_tokens`，`output_tokens = completion_tokens`。
 
