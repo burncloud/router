@@ -12,7 +12,7 @@ pub use channel::{BodyInterrupted, ReplyBody};
 pub use error::GatewayError;
 pub use gateway::{GatewayConfig, RelayGateway, Services, MAX_IDEMPOTENCY_KEY_LEN};
 pub use period::since;
-pub use ports::{Fault, PriceSource, Report, RequestIds, Shortfall, Spawn, Stage};
+pub use ports::{Fault, MeterFailed, PriceSource, Report, RequestIds, Shortfall, Spawn, Stage};
 
 #[cfg(test)]
 mod manifest {
