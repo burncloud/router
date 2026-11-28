@@ -1,6 +1,6 @@
 # burncloud/router
 
-BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/next) 0.3.0 的契约实现，计费走 [burncloud/billing](https://github.com/burncloud/billing)。
+BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/next) 0.5.0 的契约实现，计费走 [burncloud/billing](https://github.com/burncloud/billing) 0.4.0。
 
 ## 结构
 
@@ -46,17 +46,13 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 
 冻结成功后，「调用上游、读完、结算」整段交给 `Spawn`，字节经有界通道交给 `Reply::body`。结局只有一个：
 
-- 读到用量（包括上游没正常结束但已经给了用量）：按同一份快照计价并 `settle`。实际额超过冻结额或计价溢出时按冻结额结算，并报 `SettlementCapped`。
+- 读到用量（包括上游没正常结束但已经给了用量）：按同一份快照计价，用这笔 `HoldId` `settle`。实际额超过冻结额或计价溢出时按冻结额结算，并报 `SettlementCapped`。
 - 上游正常结束（`ByteStream` 读完且 `UsageMeter::ended` 为真）但读不出用量：不结算也不释放，冻结挂起等对账，报 `UsageUnreadable`。
-- 上游没正常结束且没有用量、响应头之前失败、非 2xx：`release`，不扣费。其中 meter 已在 `feed` 中报错过的，释放前记一条 `MeterFailed`。非 2xx 的响应体照常转发。
+- 上游没正常结束且没有用量、响应头之前失败、非 2xx：用这笔 `HoldId` `release`，不扣费。其中 meter 已在 `feed` 中报错过的，释放前记一条 `MeterFailed`。非 2xx 的响应体照常转发。
 
-客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障。重试时拿到 `AlreadySettled`（`settle`）或 `AlreadyReleased`（`release`）说明前一次其实已成功，按成功处理，不报故障。已经调过上游后不会因为内部错误去 `release`。
+客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障。重试时拿到 `AlreadySettled`（`settle`）或 `AlreadyReleased`（`release`）说明前一次其实已成功，按成功处理，不报故障。已经调过上游后不会因为内部错误去 `release`。`HoldMismatch` 和其它没有映射成 `Rejection` 的计费拒绝一样：报 `Stage::Settle` 或 `Stage::Release` 后返回，不扣费，也不改这笔冻结。
 
-`hold` 返回存储错误时，先报 `Stage::Hold`，再按同样的 `settle_attempts` 和 `retry_delay` 补一次 `release`，然后向客户端返回 `GatewayError::Storage`，不调用上游。这次释放把 `HoldNotFound` 和 `AlreadyReleased` 当成成功，第一次遇到也不报 `Release` 故障。其它拒绝，以及重试用尽后仍是存储失败，报 `Release` 故障。补偿释放的结果不改变返回给客户端的错误。
-
-### 已知限制
-
-客户端带了 `Idempotency-Key` 时，`RequestId` 就是这个 key。补偿 `release` 调用 `Wallet::release`，只按 `(account, request)` 定位，没有冻结归属令牌。同一账号用同一个 key 并发发两个请求时，若先到的已经冻结、后到的 `hold` 遇到存储错误，后者的补偿 `release` 可能释放先到请求的冻结。先到的请求结算时，`settle` 得到 `HoldNotFound` 或 `AlreadyReleased`，按 `Stage::Settle` 报故障，这次用量没有扣费。不会多扣该客户，也不影响其它账号。根治需要 `Wallet` 提供 hold 归属令牌（billing 接口变更，另行处理）。
+`hold` 成功时返回这一笔的 `HoldId`，之后的 `settle` 和 `release` 都带上它。`hold` 失败时没有令牌，不调用 `release`。存储错误先报 `Stage::Hold`，再向客户端返回 `GatewayError::Storage`，不调用上游。写入已经成功、只是确认丢了的冻结留给对账。
 
 每个进入上游调用的请求，在结局确定时记一次已决：按用量结算、释放冻结、读不出用量而挂起，都算。只有正常结束但读不出用量、冻结保持挂起的那次同时记入读不出。`hold` 的存储错误发生在调用上游之前，不增加已决次数，也不记 `UsageUnreadable`。计数挂在 `RelayGateway` 上，从创建起累加，不按时间滑动，告警也不把计数清零。`GatewayConfig::unreadable_threshold` 默认是 `UnreadableThreshold::DEFAULT`：至少 100 次已决，且 `unreadable / decided` 大于等于 1/100。比较是 `unreadable * ratio_den >= decided * ratio_num`，两侧用 `u128`，不用浮点。`UnreadableThreshold::new` 在窗口为 0、分母为 0 或分子大于分母时返回错误。比例从低于阈值变成达到阈值时调用一次 `Report::usage_unreadable_ratio`，字段是 `decided`、`unreadable`、`window`、`ratio_num`、`ratio_den`、`at`。一直处于达到状态不重复调用；跌回阈值以下之后再次达到会再调用。边沿和计数在同一把锁里更新。
 

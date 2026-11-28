@@ -14,7 +14,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use billing::errors::{BillingRejection, WalletError};
-use billing::model::{Direction, Entry, KeyCap, LedgerAccount, ModelUsage, TokenUsage};
+use billing::model::{
+    Direction, Entry, EntryRef, HoldId, KeyCap, LedgerAccount, ModelUsage, TokenUsage,
+};
 use billing::ports::{Pricing, Wallet};
 use identity::model::{Admission, KeyLimit, Principal, RequestsPerMinute};
 use identity::ports::{ApiKeys, RateLimiter};
@@ -573,7 +575,7 @@ pub struct Hold {
 struct Books {
     available: HashMap<AccountId, u64>,
     deposits: u64,
-    holds: HashMap<(AccountId, RequestId), (KeyId, Hold)>,
+    holds: HashMap<(AccountId, RequestId), (KeyId, HoldId, Hold)>,
     entries: Vec<Entry>,
 }
 
@@ -586,6 +588,10 @@ pub struct LedgerWallet {
     pub release_lost_acks: AtomicU32,
     pub hold_fault: AtomicBool,
     pub hold_lost_acks: AtomicU32,
+    pub holds_before_storage_fault: AtomicU32,
+    hold_attempts: AtomicU32,
+    next_hold: AtomicU64,
+    pub foreign_hold_id: AtomicBool,
     pub release_rejection: Mutex<Option<BillingRejection>>,
     pub settle_calls: AtomicUsize,
     pub release_calls: AtomicUsize,
@@ -630,7 +636,7 @@ impl LedgerWallet {
         let mut holds: Vec<_> = lock(&self.books)
             .holds
             .iter()
-            .map(|((_, request), (_, hold))| (request.clone(), *hold))
+            .map(|((_, request), (_, _, hold))| (request.clone(), *hold))
             .collect();
         holds.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
         holds
@@ -663,8 +669,8 @@ impl LedgerWallet {
         let held: u64 = books
             .holds
             .values()
-            .filter(|(_, hold)| hold.state == HoldState::Open)
-            .map(|(_, hold)| hold.amount.minor_units)
+            .filter(|(_, _, hold)| hold.state == HoldState::Open)
+            .map(|(_, _, hold)| hold.amount.minor_units)
             .sum();
         let revenue = sum(&books.entries, &LedgerAccount::Revenue, Direction::Credit);
         assert_eq!(available + held + revenue, books.deposits);
@@ -680,7 +686,7 @@ impl LedgerWallet {
         at: u64,
     ) {
         books.entries.push(Entry {
-            request: request.clone(),
+            reference: EntryRef::Request(request.clone()),
             account,
             key: Some(key.clone()),
             direction,
@@ -717,12 +723,19 @@ impl Wallet for LedgerWallet {
         key: &KeyId,
         cap: Option<KeyCap>,
         amount: Money,
-    ) -> impl Future<Output = Result<(), WalletError<StoreDown>>> + Send {
+    ) -> impl Future<Output = Result<HoldId, WalletError<StoreDown>>> + Send {
         lock(&self.caps).push(cap);
         let at = self.clock.load(Ordering::SeqCst);
         let result = (|| {
             if self.hold_fault.load(Ordering::SeqCst) {
                 return Err(WalletError::Storage(StoreDown));
+            }
+            let limit = self.holds_before_storage_fault.load(Ordering::SeqCst);
+            if limit > 0 {
+                let seen = self.hold_attempts.fetch_add(1, Ordering::SeqCst);
+                if seen >= limit {
+                    return Err(WalletError::Storage(StoreDown));
+                }
             }
             let mut books = lock(&self.books);
             let hold_key = (account.clone(), request.clone());
@@ -739,8 +752,8 @@ impl Wallet for LedgerWallet {
                 let spent: u64 = books
                     .holds
                     .values()
-                    .filter(|(holder, _)| holder == key)
-                    .map(|(_, hold)| match hold.state {
+                    .filter(|(holder, _, _)| holder == key)
+                    .map(|(_, _, hold)| match hold.state {
                         HoldState::Open => hold.amount.minor_units,
                         HoldState::Settled(actual) => actual,
                         HoldState::Released => 0,
@@ -754,6 +767,13 @@ impl Wallet for LedgerWallet {
             if available < amount.minor_units {
                 return Err(WalletError::Rejected(BillingRejection::InsufficientBalance));
             }
+            let serial = self.next_hold.fetch_add(1, Ordering::SeqCst) + 1;
+            let id = HoldId(serial.to_string());
+            let stored = if self.foreign_hold_id.load(Ordering::SeqCst) {
+                HoldId(format!("other-{serial}"))
+            } else {
+                id.clone()
+            };
             books
                 .available
                 .insert(account.clone(), available - amount.minor_units);
@@ -761,6 +781,7 @@ impl Wallet for LedgerWallet {
                 hold_key,
                 (
                     key.clone(),
+                    stored,
                     Hold {
                         amount,
                         state: HoldState::Open,
@@ -788,7 +809,7 @@ impl Wallet for LedgerWallet {
             if take_fault(&self.hold_lost_acks) {
                 return Err(WalletError::Storage(StoreDown));
             }
-            Ok(())
+            Ok(id)
         })();
         ready(result)
     }
@@ -797,6 +818,7 @@ impl Wallet for LedgerWallet {
         &self,
         account: &AccountId,
         request: &RequestId,
+        presented: &HoldId,
         amount: Money,
     ) -> impl Future<Output = Result<(), WalletError<StoreDown>>> + Send {
         self.settle_calls.fetch_add(1, Ordering::SeqCst);
@@ -806,7 +828,7 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Storage(StoreDown));
             }
             let mut books = lock(&self.books);
-            let Some((key, hold)) = books
+            let Some((key, id, hold)) = books
                 .holds
                 .get(&(account.clone(), request.clone()))
                 .cloned()
@@ -814,7 +836,10 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Rejected(BillingRejection::HoldNotFound));
             };
             match hold.state {
-                HoldState::Open => {}
+                HoldState::Open if &id == presented => {}
+                HoldState::Open => {
+                    return Err(WalletError::Rejected(BillingRejection::HoldMismatch))
+                }
                 HoldState::Settled(_) => {
                     return Err(WalletError::Rejected(BillingRejection::AlreadySettled))
                 }
@@ -833,6 +858,7 @@ impl Wallet for LedgerWallet {
                 (account.clone(), request.clone()),
                 (
                     key.clone(),
+                    id,
                     Hold {
                         amount: hold.amount,
                         state: HoldState::Settled(amount.minor_units),
@@ -878,6 +904,7 @@ impl Wallet for LedgerWallet {
         &self,
         account: &AccountId,
         request: &RequestId,
+        presented: &HoldId,
     ) -> impl Future<Output = Result<(), WalletError<StoreDown>>> + Send {
         self.release_calls.fetch_add(1, Ordering::SeqCst);
         let at = self.clock.load(Ordering::SeqCst);
@@ -889,7 +916,7 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Storage(StoreDown));
             }
             let mut books = lock(&self.books);
-            let Some((key, hold)) = books
+            let Some((key, id, hold)) = books
                 .holds
                 .get(&(account.clone(), request.clone()))
                 .cloned()
@@ -897,7 +924,10 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Rejected(BillingRejection::HoldNotFound));
             };
             match hold.state {
-                HoldState::Open => {}
+                HoldState::Open if &id == presented => {}
+                HoldState::Open => {
+                    return Err(WalletError::Rejected(BillingRejection::HoldMismatch))
+                }
                 HoldState::Settled(_) => {
                     return Err(WalletError::Rejected(BillingRejection::AlreadySettled))
                 }
@@ -910,6 +940,7 @@ impl Wallet for LedgerWallet {
                 (account.clone(), request.clone()),
                 (
                     key.clone(),
+                    id,
                     Hold {
                         amount: hold.amount,
                         state: HoldState::Released,
@@ -950,7 +981,7 @@ impl Wallet for LedgerWallet {
         let result = lock(&self.books)
             .holds
             .get(&(account.clone(), request.clone()))
-            .map(|(_, hold)| match hold.state {
+            .map(|(_, _, hold)| match hold.state {
                 HoldState::Open => hold.amount,
                 HoldState::Settled(_) | HoldState::Released => usd(0),
             })
@@ -967,8 +998,8 @@ impl Wallet for LedgerWallet {
         let spent = lock(&self.books)
             .holds
             .values()
-            .filter(|(holder, _)| holder == key)
-            .map(|(_, hold)| match hold.state {
+            .filter(|(holder, _, _)| holder == key)
+            .map(|(_, _, hold)| match hold.state {
                 HoldState::Open => hold.amount.minor_units,
                 HoldState::Settled(actual) => actual,
                 HoldState::Released => 0,

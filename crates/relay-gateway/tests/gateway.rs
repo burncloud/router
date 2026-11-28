@@ -375,18 +375,8 @@ fn hold_storage_fault() -> Fault {
     }
 }
 
-fn release_fault(attempts: u32, detail: &str) -> Fault {
-    Fault {
-        stage: Stage::Release,
-        request: Some(RequestId("gen-1".into())),
-        account: Some(AccountId(ACCOUNT.into())),
-        attempts,
-        detail: detail.to_owned(),
-    }
-}
-
 #[test]
-fn hold_storage_then_release_succeeds() {
+fn hold_lost_ack_stays_open_without_release() {
     let gateway = stack();
     gateway
         .services()
@@ -394,9 +384,9 @@ fn hold_storage_then_release_succeeds() {
         .hold_lost_acks
         .store(1, Ordering::SeqCst);
     assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
-    one_hold(&gateway, HoldState::Released);
-    assert_eq!(calls(&gateway), (0, 1));
-    assert_eq!(gateway.services().wallet.available(ACCOUNT), BALANCE);
+    one_hold(&gateway, HoldState::Open);
+    assert_eq!(calls(&gateway), (0, 0));
+    assert_eq!(gateway.services().wallet.available(ACCOUNT), BALANCE - HELD);
     assert_eq!(gateway.services().wallet.revenue(), 0);
     assert_eq!(gateway.services().threads.sleeps(), []);
     gateway.services().wallet.check_books();
@@ -412,7 +402,7 @@ fn hold_storage_then_missing_hold_is_not_a_release_fault() {
         .store(true, Ordering::SeqCst);
     assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
     assert_eq!(holds(&gateway), []);
-    assert_eq!(calls(&gateway), (0, 1));
+    assert_eq!(calls(&gateway), (0, 0));
     assert_eq!(gateway.services().wallet.available(ACCOUNT), BALANCE);
     assert_eq!(gateway.services().wallet.revenue(), 0);
     gateway.services().wallet.check_books();
@@ -429,13 +419,13 @@ fn hold_storage_then_already_released_is_not_a_release_fault() {
     *lock(&gateway.services().wallet.release_rejection) = Some(BillingRejection::AlreadyReleased);
     assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
     assert_eq!(holds(&gateway), []);
-    assert_eq!(calls(&gateway), (0, 1));
+    assert_eq!(calls(&gateway), (0, 0));
     assert_eq!(gateway.services().threads.sleeps(), []);
     gateway.services().wallet.check_books();
 }
 
 #[test]
-fn hold_storage_then_other_release_rejection_is_a_fault() {
+fn hold_storage_does_not_release_on_a_staged_rejection() {
     let gateway = stack();
     gateway
         .services()
@@ -443,17 +433,14 @@ fn hold_storage_then_other_release_rejection_is_a_fault() {
         .hold_fault
         .store(true, Ordering::SeqCst);
     *lock(&gateway.services().wallet.release_rejection) = Some(BillingRejection::AlreadySettled);
-    assert_eq!(
-        client_storage(&gateway),
-        [hold_storage_fault(), release_fault(1, "AlreadySettled")]
-    );
-    assert_eq!(calls(&gateway), (0, 1));
+    assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
+    assert_eq!(calls(&gateway), (0, 0));
     assert_eq!(gateway.services().threads.sleeps(), []);
     gateway.services().wallet.check_books();
 }
 
 #[test]
-fn hold_storage_release_retries_then_succeeds() {
+fn hold_lost_ack_does_not_retry_release() {
     let gateway = stack();
     gateway
         .services()
@@ -466,18 +453,15 @@ fn hold_storage_release_retries_then_succeeds() {
         .release_faults
         .store(2, Ordering::SeqCst);
     assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
-    one_hold(&gateway, HoldState::Released);
-    assert_eq!(calls(&gateway), (0, 3));
-    assert_eq!(
-        gateway.services().threads.sleeps(),
-        [Duration::from_millis(7), Duration::from_millis(7)]
-    );
+    one_hold(&gateway, HoldState::Open);
+    assert_eq!(calls(&gateway), (0, 0));
+    assert_eq!(gateway.services().threads.sleeps(), []);
     assert_eq!(gateway.services().wallet.revenue(), 0);
     gateway.services().wallet.check_books();
 }
 
 #[test]
-fn hold_storage_release_exhausts_retries() {
+fn hold_lost_ack_stays_open_when_release_would_fail() {
     let gateway = stack();
     gateway
         .services()
@@ -489,13 +473,10 @@ fn hold_storage_release_exhausts_retries() {
         .wallet
         .release_faults
         .store(5, Ordering::SeqCst);
-    assert_eq!(
-        client_storage(&gateway),
-        [hold_storage_fault(), release_fault(3, "StoreDown")]
-    );
+    assert_eq!(client_storage(&gateway), [hold_storage_fault()]);
     one_hold(&gateway, HoldState::Open);
-    assert_eq!(calls(&gateway), (0, 3));
-    assert_eq!(gateway.services().threads.sleeps().len(), 2);
+    assert_eq!(calls(&gateway), (0, 0));
+    assert_eq!(gateway.services().threads.sleeps().len(), 0);
     assert_eq!(gateway.services().wallet.available(ACCOUNT), BALANCE - HELD);
     assert_eq!(gateway.services().wallet.revenue(), 0);
     gateway.services().wallet.check_books();
@@ -880,6 +861,91 @@ fn concurrent_duplicates_call_upstream_once() {
     );
     assert_eq!(gateway.services().upstream.calls(), 1);
     assert_eq!(holds(&gateway).len(), 1);
+}
+
+#[test]
+fn same_key_storage_failure_leaves_the_first_hold_to_settle() {
+    let gateway = stack();
+    gateway
+        .services()
+        .wallet
+        .holds_before_storage_fault
+        .store(1, Ordering::SeqCst);
+    gateway.services().upstream.push(Script::Reply(
+        200,
+        vec![chunk("usage:1,0,1"), chunk("done")],
+    ));
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let gateway = gateway.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                match call(&gateway, Some("same-request"), "gpt") {
+                    Ok(mut reply) => {
+                        drain(&mut reply.body);
+                        None
+                    }
+                    Err(error) => Some(error),
+                }
+            })
+        })
+        .collect();
+    let mut errors = Vec::new();
+    for worker in workers {
+        let Ok(result) = worker.join() else {
+            panic!("worker panicked");
+        };
+        errors.extend(result);
+    }
+    gateway.services().threads.join();
+    assert_eq!(errors, [GatewayError::Storage]);
+    assert_eq!(calls(&gateway), (1, 0));
+    assert_eq!(gateway.services().wallet.revenue(), gpt_price(1, 0, 1));
+    match holds(&gateway).as_slice() {
+        [(_, hold)] => assert_eq!(hold.state, HoldState::Settled(gpt_price(1, 0, 1))),
+        _ => panic!("expected one hold"),
+    }
+    assert_eq!(
+        gateway.services().report.events(),
+        [Event::Fault(hold_storage_fault())]
+    );
+    gateway.services().wallet.check_books();
+}
+
+#[test]
+fn hold_mismatch_does_not_charge_or_release() {
+    let cases = [
+        (
+            Script::Reply(200, vec![chunk("usage:1,0,1"), chunk("done")]),
+            (1, 0),
+            Stage::Settle,
+        ),
+        (
+            Script::Reply(200, vec![chunk("a"), Step::Break]),
+            (0, 1),
+            Stage::Release,
+        ),
+    ];
+    for (script, expected_calls, stage) in cases {
+        let gateway = stack();
+        gateway
+            .services()
+            .wallet
+            .foreign_hold_id
+            .store(true, Ordering::SeqCst);
+        run(&gateway, script);
+        assert_eq!(calls(&gateway), expected_calls);
+        one_hold(&gateway, HoldState::Open);
+        assert_eq!(gateway.services().wallet.revenue(), 0);
+        let [Event::Fault(fault)] = &gateway.services().report.events()[..] else {
+            panic!("expected one fault");
+        };
+        assert_eq!(fault.stage, stage);
+        assert_eq!(fault.detail, "HoldMismatch");
+        gateway.services().wallet.check_books();
+    }
 }
 
 #[test]
