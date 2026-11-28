@@ -1,3 +1,5 @@
+use std::cell::OnceCell;
+
 use billing::model::TokenUsage;
 use router::ports::UsageMeter;
 use serde_json::Value;
@@ -15,7 +17,26 @@ pub struct OpenAiMeter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     Stream(StreamState),
-    Whole(Vec<u8>),
+    Whole(WholeBody),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WholeBody {
+    bytes: Vec<u8>,
+    complete: OnceCell<bool>,
+}
+
+impl WholeBody {
+    fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        self.complete = OnceCell::new();
+    }
+
+    fn complete(&self) -> bool {
+        *self
+            .complete
+            .get_or_init(|| serde_json::from_slice::<serde::de::IgnoredAny>(&self.bytes).is_ok())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,7 +51,7 @@ impl OpenAiMeter {
         let mode = if streaming {
             Mode::Stream(StreamState::default())
         } else {
-            Mode::Whole(Vec::new())
+            Mode::Whole(WholeBody::default())
         };
         Self {
             mode,
@@ -97,7 +118,7 @@ impl UsageMeter for OpenAiMeter {
     fn feed(&mut self, bytes: &[u8]) -> Result<(), MeterError> {
         match &mut self.mode {
             Mode::Stream(state) => state.feed(bytes, &mut self.failure),
-            Mode::Whole(body) => body.extend_from_slice(bytes),
+            Mode::Whole(body) => body.push(bytes),
         }
         self.failure.map_or(Ok(()), Err)
     }
@@ -105,7 +126,7 @@ impl UsageMeter for OpenAiMeter {
     fn ended(&self) -> bool {
         match &self.mode {
             Mode::Stream(state) => state.done,
-            Mode::Whole(body) => serde_json::from_slice::<serde::de::IgnoredAny>(body).is_ok(),
+            Mode::Whole(body) => body.complete(),
         }
     }
 
@@ -115,7 +136,7 @@ impl UsageMeter for OpenAiMeter {
         }
         match self.mode {
             Mode::Stream(state) => state.usage.ok_or(MeterError::MissingUsage),
-            Mode::Whole(body) => whole_usage(&body),
+            Mode::Whole(body) => whole_usage(&body.bytes),
         }
     }
 }
