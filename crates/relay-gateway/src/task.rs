@@ -2,7 +2,7 @@ use core::fmt::Debug;
 use core::future::Future;
 use std::sync::Arc;
 
-use billing::errors::WalletError;
+use billing::errors::{BillingRejection, WalletError};
 use billing::model::ModelUsage;
 use billing::ports::{Pricing, Wallet};
 use identity::model::Principal;
@@ -166,17 +166,27 @@ async fn settle<S: Services>(
         (None, None) => held,
     };
     let wallet = services.wallet();
-    retry(services, Stage::Settle, principal, request, || {
-        wallet.settle(&principal.account, request, amount)
-    })
+    retry(
+        services,
+        Stage::Settle,
+        principal,
+        request,
+        BillingRejection::AlreadySettled,
+        || wallet.settle(&principal.account, request, amount),
+    )
     .await;
 }
 
 async fn release<S: Services>(services: &S, principal: &Principal, request: &RequestId) {
     let wallet = services.wallet();
-    retry(services, Stage::Release, principal, request, || {
-        wallet.release(&principal.account, request)
-    })
+    retry(
+        services,
+        Stage::Release,
+        principal,
+        request,
+        BillingRejection::AlreadyReleased,
+        || wallet.release(&principal.account, request),
+    )
     .await;
 }
 
@@ -185,6 +195,7 @@ async fn retry<S, F, Fut, E>(
     stage: Stage,
     principal: &Principal,
     request: &RequestId,
+    done: BillingRejection,
     mut attempt: F,
 ) where
     S: Services,
@@ -197,6 +208,7 @@ async fn retry<S, F, Fut, E>(
     loop {
         match attempt().await {
             Ok(()) => return,
+            Err(WalletError::Rejected(rejection)) if attempts > 1 && rejection == done => return,
             Err(WalletError::Rejected(rejection)) => {
                 fault(services, stage, principal, request, attempts, &rejection);
                 return;

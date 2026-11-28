@@ -235,11 +235,12 @@ pub enum MeterFault {
     Missing,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct ScriptMeter {
     usage: Option<TokenUsage>,
     done: bool,
     failure: Option<MeterFault>,
+    ended_calls: Arc<AtomicUsize>,
 }
 
 fn parse_usage(text: &str) -> Option<TokenUsage> {
@@ -280,6 +281,7 @@ impl UsageMeter for ScriptMeter {
     }
 
     fn ended(&self) -> bool {
+        self.ended_calls.fetch_add(1, Ordering::SeqCst);
         self.done
     }
 
@@ -296,6 +298,7 @@ pub const MAX_OUTPUT: u64 = 1_000;
 #[derive(Debug, Default)]
 pub struct ScriptAdapter {
     pub streaming: AtomicBool,
+    pub ended_calls: Arc<AtomicUsize>,
 }
 
 impl Adapter for ScriptAdapter {
@@ -320,7 +323,10 @@ impl Adapter for ScriptAdapter {
             },
             upstream_body,
             streaming: self.streaming.load(Ordering::SeqCst),
-            meter: ScriptMeter::default(),
+            meter: ScriptMeter {
+                ended_calls: Arc::clone(&self.ended_calls),
+                ..ScriptMeter::default()
+            },
         })
     }
 }
@@ -564,7 +570,9 @@ struct Books {
 pub struct LedgerWallet {
     books: Mutex<Books>,
     pub settle_faults: AtomicU32,
+    pub settle_lost_acks: AtomicU32,
     pub release_faults: AtomicU32,
+    pub release_lost_acks: AtomicU32,
     pub hold_fault: AtomicBool,
     pub settle_calls: AtomicUsize,
     pub release_calls: AtomicUsize,
@@ -842,6 +850,9 @@ impl Wallet for LedgerWallet {
                 refund,
                 at,
             );
+            if take_fault(&self.settle_lost_acks) {
+                return Err(WalletError::Storage(StoreDown));
+            }
             Ok(())
         })();
         ready(result)
@@ -904,6 +915,9 @@ impl Wallet for LedgerWallet {
                 hold.amount.minor_units,
                 at,
             );
+            if take_fault(&self.release_lost_acks) {
+                return Err(WalletError::Storage(StoreDown));
+            }
             Ok(())
         })();
         ready(result)

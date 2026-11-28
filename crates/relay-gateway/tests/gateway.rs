@@ -702,6 +702,77 @@ fn release_faults_are_retried() {
 }
 
 #[test]
+fn lost_settle_acknowledgements_count_as_settled() {
+    let gateway = stack();
+    gateway
+        .services()
+        .wallet
+        .settle_lost_acks
+        .store(1, Ordering::SeqCst);
+    run(
+        &gateway,
+        Script::Reply(200, vec![chunk("usage:5,1,20"), chunk("done")]),
+    );
+    one_hold(&gateway, HoldState::Settled(gpt_price(5, 1, 20)));
+    assert_eq!(calls(&gateway), (2, 0));
+    assert_eq!(gateway.services().threads.sleeps().len(), 1);
+    assert_eq!(gateway.services().report.events(), []);
+    gateway.services().wallet.check_books();
+}
+
+#[test]
+fn lost_release_acknowledgements_count_as_released() {
+    let gateway = stack();
+    gateway
+        .services()
+        .wallet
+        .release_lost_acks
+        .store(1, Ordering::SeqCst);
+    run(&gateway, Script::Reply(200, vec![chunk("a"), Step::Break]));
+    one_hold(&gateway, HoldState::Released);
+    assert_eq!(calls(&gateway), (0, 2));
+    assert_eq!(gateway.services().report.events(), []);
+    gateway.services().wallet.check_books();
+}
+
+fn ended_calls(gateway: &RelayGateway<Stack>) -> usize {
+    gateway
+        .services()
+        .adapter
+        .ended_calls
+        .load(Ordering::SeqCst)
+}
+
+#[test]
+fn the_meter_is_asked_once_after_the_body_is_read() {
+    let gateway = stack();
+    let mut steps = vec![chunk("a"); 40];
+    steps.push(chunk("usage:5,1,20"));
+    steps.push(chunk("done"));
+    run(&gateway, Script::Reply(200, steps));
+    assert_eq!(ended_calls(&gateway), 1);
+    one_hold(&gateway, HoldState::Settled(gpt_price(5, 1, 20)));
+}
+
+#[test]
+fn the_meter_is_not_asked_without_a_normal_end() {
+    let gateway = stack();
+    run(&gateway, Script::Reply(200, vec![chunk("a"), Step::Break]));
+    assert_eq!(ended_calls(&gateway), 0);
+    gateway
+        .services()
+        .upstream
+        .push(Script::Reply(500, vec![chunk("a")]));
+    let Ok(mut reply) = call(&gateway, None, "gpt") else {
+        panic!("request failed");
+    };
+    drain(&mut reply.body);
+    drop(reply);
+    gateway.services().threads.join();
+    assert_eq!(ended_calls(&gateway), 0);
+}
+
+#[test]
 fn non_success_status_releases_and_forwards_the_body() {
     let gateway = stack();
     let (reply, chunks, interrupted) = run(
