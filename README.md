@@ -26,7 +26,7 @@ BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/ne
 `UsageMeter`：
 
 - 流式按 SSE 行在字节层面跨块切分，`\n` 和 `\r\n` 都认，不做有损解码。`"usage": null` 跳过，出现两次非空 usage、`[DONE]` 之后还有数据、上游的 error 事件、响应里 `service_tier` 不是 `default`，都返回错误。读到 `data: [DONE]` 加空行后 `ended()` 为真。
-- 非流式读完整个响应体后取顶层 `usage`，响应体是完整 JSON 时 `ended()` 为真。这个结果在两次 `feed` 之间只算一次。
+- 非流式读完整个响应体后取顶层 `usage`，响应体是完整 JSON 时 `ended()` 为真。`feed` 只累积字节，`ended()` 每次调用都解析整个响应体，所以调用方只能在上游读完后调一次，`relay-gateway` 就是这样做的。
 - 用量字段集合固定：`prompt_tokens`、`completion_tokens`、`total_tokens`、`prompt_tokens_details.{cached_tokens,audio_tokens}`、`completion_tokens_details.{reasoning_tokens,audio_tokens,accepted_prediction_tokens,rejected_prediction_tokens}`。缺字段、多字段、不是 u64、`total_tokens` 不等于两项之和、缓存数大于输入、推理数大于输出、audio 或 prediction 不为 0，都返回错误，不按 0 处理。
 - 换算：`input_tokens = prompt_tokens - cached_tokens`，`cached_input_tokens = cached_tokens`，`output_tokens = completion_tokens`。
 
@@ -49,7 +49,7 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 - 上游正常结束（`ByteStream` 读完且 `UsageMeter::ended` 为真）但读不出用量：不结算也不释放，冻结挂起等对账，报 `UsageUnreadable`。
 - 上游没正常结束且没有用量、响应头之前失败、非 2xx：`release`，不扣费。非 2xx 的响应体照常转发。
 
-客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障，已经调过上游后不会因为内部错误去 `release`。
+客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障。重试时拿到 `AlreadySettled`（`settle`）或 `AlreadyReleased`（`release`）说明前一次其实已成功，按成功处理，不报故障。已经调过上游后不会因为内部错误去 `release`。
 
 IO 依赖和 `relay-openai` 由 `crates/relay-gateway/bans.toml` 和清单测试禁止。
 

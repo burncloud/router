@@ -15,20 +15,7 @@ pub struct OpenAiMeter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     Stream(StreamState),
-    Whole(WholeBody),
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct WholeBody {
-    bytes: Vec<u8>,
-    complete: bool,
-}
-
-impl WholeBody {
-    fn push(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-        self.complete = serde_json::from_slice::<serde::de::IgnoredAny>(&self.bytes).is_ok();
-    }
+    Whole(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,7 +30,7 @@ impl OpenAiMeter {
         let mode = if streaming {
             Mode::Stream(StreamState::default())
         } else {
-            Mode::Whole(WholeBody::default())
+            Mode::Whole(Vec::new())
         };
         Self {
             mode,
@@ -110,7 +97,7 @@ impl UsageMeter for OpenAiMeter {
     fn feed(&mut self, bytes: &[u8]) -> Result<(), MeterError> {
         match &mut self.mode {
             Mode::Stream(state) => state.feed(bytes, &mut self.failure),
-            Mode::Whole(body) => body.push(bytes),
+            Mode::Whole(body) => body.extend_from_slice(bytes),
         }
         self.failure.map_or(Ok(()), Err)
     }
@@ -118,7 +105,7 @@ impl UsageMeter for OpenAiMeter {
     fn ended(&self) -> bool {
         match &self.mode {
             Mode::Stream(state) => state.done,
-            Mode::Whole(body) => body.complete,
+            Mode::Whole(body) => serde_json::from_slice::<serde::de::IgnoredAny>(body).is_ok(),
         }
     }
 
@@ -128,7 +115,7 @@ impl UsageMeter for OpenAiMeter {
         }
         match self.mode {
             Mode::Stream(state) => state.usage.ok_or(MeterError::MissingUsage),
-            Mode::Whole(body) => whole_usage(&body.bytes),
+            Mode::Whole(body) => whole_usage(&body),
         }
     }
 }

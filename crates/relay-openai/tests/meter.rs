@@ -254,6 +254,23 @@ fn whole_body_end_follows_later_bytes() {
 }
 
 #[test]
+fn whole_body_feed_only_collects_bytes() {
+    let body = completion(USAGE).to_string();
+    let mut partial = meter(false);
+    for byte in b"{\"usage\": nonsense" {
+        assert_eq!(partial.feed(&[*byte]), Ok(()));
+    }
+    assert!(!partial.ended());
+    assert_eq!(partial.finish(), Err(MeterError::IncompleteBody));
+    let mut complete = meter(false);
+    for byte in body.as_bytes() {
+        assert_eq!(complete.feed(&[*byte]), Ok(()));
+    }
+    assert!(complete.ended());
+    assert_eq!(complete.finish(), Ok(EXPECTED));
+}
+
+#[test]
 fn whole_body_must_be_an_object_without_error() {
     assert_eq!(run(false, &[b"[]"]), (true, Err(MeterError::InvalidEvent)));
     let error = json!({"error": {"message": "x"}});
