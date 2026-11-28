@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/relay-openai"]
+members = ["crates/relay-gateway", "crates/relay-openai"]
 
 [workspace.package]
 version = "0.1.0"
