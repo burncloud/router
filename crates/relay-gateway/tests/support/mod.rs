@@ -21,7 +21,8 @@ use identity::ports::{ApiKeys, RateLimiter};
 use kernel::model::{AccountId, Currency, KeyId, ModelId, Money, RequestId, UnixMillis};
 use kernel::ports::Clock;
 use relay_gateway::{
-    Fault, GatewayConfig, PriceSource, RelayGateway, Report, RequestIds, Services, Shortfall, Spawn,
+    Fault, GatewayConfig, MeterFailed, PriceSource, RelayGateway, Report, RequestIds, Services,
+    Shortfall, Spawn,
 };
 use router::model::{Prepared, UpstreamReply};
 use router::ports::{Adapter, ByteStream, Upstream, UsageMeter};
@@ -115,6 +116,7 @@ impl Spawn for Threads {
 pub enum Event {
     Unreadable(UsageUnreadable),
     Capped(SettlementCapped, Shortfall),
+    MeterFailed(MeterFailed),
     Fault(Fault),
 }
 
@@ -136,6 +138,10 @@ impl Report for Recorder {
 
     fn settlement_capped(&self, event: &SettlementCapped, shortfall: Shortfall) {
         lock(&self.events).push(Event::Capped(event.clone(), shortfall));
+    }
+
+    fn meter_failed(&self, event: &MeterFailed) {
+        lock(&self.events).push(Event::MeterFailed(event.clone()));
     }
 
     fn fault(&self, fault: &Fault) {
