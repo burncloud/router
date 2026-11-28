@@ -28,6 +28,19 @@ impl EventSplitter {
         self.over_limit
     }
 
+    #[cfg(test)]
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn content_len(line: &[u8]) -> usize {
+        if line.last() == Some(&b'\r') {
+            line.len().saturating_sub(1)
+        } else {
+            line.len()
+        }
+    }
+
     fn drop_buffers(&mut self) {
         self.line = Vec::new();
         self.data = None;
@@ -45,11 +58,11 @@ impl EventSplitter {
         }
         for &byte in bytes {
             if byte != b'\n' {
-                if self.line.len() >= self.limit {
+                self.line.push(byte);
+                if Self::content_len(&self.line) > self.limit {
                     self.exceed();
                     break;
                 }
-                self.line.push(byte);
                 continue;
             }
             let mut line = std::mem::take(&mut self.line);
@@ -205,5 +218,48 @@ mod tests {
         expected.extend_from_slice(b"abcdef");
         assert_eq!(splitter.push(&input), [expected]);
         assert!(!splitter.overflowed());
+    }
+
+    #[test]
+    fn line_at_the_limit_with_crlf_is_kept() {
+        let mut splitter = EventSplitter::with_limit(8);
+        assert_eq!(splitter.push(b"abcdefgh\r\n"), Vec::<Vec<u8>>::new());
+        assert!(!splitter.overflowed());
+        assert_eq!(splitter.line.len(), 0);
+        assert_eq!(splitter.push(b"data: ab\r\n\r\n"), [b"ab".to_vec()]);
+        assert!(!splitter.overflowed());
+    }
+
+    #[test]
+    fn line_over_the_limit_with_crlf_is_dropped() {
+        let mut splitter = EventSplitter::with_limit(8);
+        assert_eq!(splitter.push(b"data: abc\r\n\r\n"), Vec::<Vec<u8>>::new());
+        assert!(splitter.overflowed());
+        assert_eq!(splitter.line, [] as [u8; 0]);
+        assert!(splitter.data.is_none());
+        assert_eq!(splitter.push(b"data: a\r\n\r\n"), Vec::<Vec<u8>>::new());
+        assert!(splitter.overflowed());
+    }
+
+    #[test]
+    fn joined_data_at_the_limit_with_crlf_is_kept() {
+        let mut splitter = EventSplitter::with_limit(12);
+        assert_eq!(
+            splitter.push(b"data: abcde\r\ndata: abcdef\r\n\r\n"),
+            [b"abcde\nabcdef".to_vec()]
+        );
+        assert!(!splitter.overflowed());
+    }
+
+    #[test]
+    fn joined_data_over_the_limit_with_crlf_is_dropped() {
+        let mut splitter = EventSplitter::with_limit(12);
+        assert_eq!(
+            splitter.push(b"data: abcdef\r\ndata: abcdef\r\n\r\n"),
+            Vec::<Vec<u8>>::new()
+        );
+        assert!(splitter.overflowed());
+        assert!(splitter.data.is_none());
+        assert_eq!(splitter.line, [] as [u8; 0]);
     }
 }
