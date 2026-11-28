@@ -19,6 +19,7 @@ use crate::channel::{channel, Message, ReplyBody};
 use crate::error::GatewayError;
 use crate::period::since;
 use crate::ports::{Fault, PriceSource, Report, RequestIds, Spawn, Stage};
+use crate::ratio::{UnreadableThreshold, Watch};
 use crate::task::{relay, Job};
 
 /// `Idempotency-Key` 的最大字节数。
@@ -31,6 +32,8 @@ pub struct GatewayConfig {
     /// 结算或释放遇到存储失败时，连同第一次在内最多尝试的次数。用完后冻结留给对账。
     pub settle_attempts: NonZeroU32,
     pub retry_delay: Duration,
+    /// 已决次数和读不出用量的比例。默认是 `UnreadableThreshold::DEFAULT`。
+    pub unreadable_threshold: UnreadableThreshold,
 }
 
 /// 编排用到的全部端口。实现方把各个实现放进一个结构体里交给 [`RelayGateway`]。
@@ -65,12 +68,14 @@ type Failure<S> = GatewayError<AdapterError<S>, PricingError<S>>;
 
 pub struct RelayGateway<S> {
     services: Arc<S>,
+    watch: Arc<Watch>,
 }
 
 impl<S> Clone for RelayGateway<S> {
     fn clone(&self) -> Self {
         Self {
             services: Arc::clone(&self.services),
+            watch: Arc::clone(&self.watch),
         }
     }
 }
@@ -86,8 +91,10 @@ impl<S> core::fmt::Debug for RelayGateway<S> {
 impl<S: Services> RelayGateway<S> {
     #[must_use]
     pub fn new(services: S) -> Self {
+        let watch = Arc::new(Watch::new(services.config().unreadable_threshold));
         Self {
             services: Arc::new(services),
+            watch,
         }
     }
 
@@ -229,6 +236,7 @@ impl<S: Services> Gateway for RelayGateway<S> {
         let streaming = prepared.streaming;
         services.spawner().spawn(relay(
             Arc::clone(&self.services),
+            Arc::clone(&self.watch),
             Job {
                 principal,
                 request,

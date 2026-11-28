@@ -6,7 +6,7 @@ use billing::errors::{BillingRejection, WalletError};
 use billing::model::ModelUsage;
 use billing::ports::{Pricing, Wallet};
 use identity::model::Principal;
-use kernel::model::{ModelId, Money, RequestId};
+use kernel::model::{ModelId, Money, RequestId, UnixMillis};
 use kernel::ports::Clock;
 use router::ports::{Adapter, ByteStream, Upstream, UsageMeter};
 use runtime::events::{ActualCost, SettlementCapped, UsageUnreadable};
@@ -14,6 +14,7 @@ use runtime::events::{ActualCost, SettlementCapped, UsageUnreadable};
 use crate::channel::{Message, Sender};
 use crate::gateway::Services;
 use crate::ports::{Fault, MeterFailed, PriceSource, Report, Shortfall, Spawn, Stage};
+use crate::ratio::Watch;
 
 type Meter<S> = <<S as Services>::Adapter as Adapter>::Meter;
 type Prices<S> = <<S as Services>::Prices as PriceSource>::Prices;
@@ -43,8 +44,14 @@ impl Forward {
     }
 }
 
-pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Sender) {
+pub(crate) async fn relay<S: Services>(
+    services: Arc<S>,
+    watch: Arc<Watch>,
+    job: Job<S>,
+    sender: Sender,
+) {
     let services = &*services;
+    let watch = &*watch;
     let Job {
         principal,
         request,
@@ -64,6 +71,7 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
             fault(services, Stage::Upstream, &principal, &request, 1, &error);
             release(services, &principal, &request).await;
             forward.send(Message::Failed).await;
+            count(services, watch, false, services.clock().now());
             return;
         }
     };
@@ -91,6 +99,7 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
     };
     drop(forward);
     if !success {
+        count(services, watch, false, services.clock().now());
         return;
     }
     let ended = finished && meter.ended();
@@ -98,14 +107,19 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
         Some(tokens) => {
             let actual = prices.price(&ModelUsage { model, tokens }).ok();
             settle(services, &principal, &request, held, actual).await;
+            count(services, watch, false, services.clock().now());
         }
-        None if ended => services.report().usage_unreadable(&UsageUnreadable {
-            request,
-            account: principal.account,
-            key: principal.key,
-            held,
-            at: services.clock().now(),
-        }),
+        None if ended => {
+            let at = services.clock().now();
+            services.report().usage_unreadable(&UsageUnreadable {
+                request,
+                account: principal.account,
+                key: principal.key,
+                held,
+                at,
+            });
+            count(services, watch, true, at);
+        }
         None => {
             if meter_failed {
                 services.report().meter_failed(&MeterFailed {
@@ -117,7 +131,14 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
                 });
             }
             release(services, &principal, &request).await;
+            count(services, watch, false, services.clock().now());
         }
+    }
+}
+
+fn count<S: Services>(services: &S, watch: &Watch, unreadable: bool, at: UnixMillis) {
+    if let Some(event) = watch.record(unreadable, at) {
+        services.report().usage_unreadable_ratio(&event);
     }
 }
 

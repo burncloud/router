@@ -8,8 +8,8 @@ use billing::model::KeyCap;
 use identity::model::{KeyLimit, LimitPeriod, RequestsPerMinute, SpendLimit};
 use kernel::model::{AccountId, Currency, KeyId, Money, RequestId, UnixMillis};
 use relay_gateway::{
-    since, BodyInterrupted, GatewayError, MeterFailed, RelayGateway, ReplyBody, Shortfall, Stage,
-    MAX_IDEMPOTENCY_KEY_LEN,
+    since, BodyInterrupted, GatewayConfig, GatewayError, MeterFailed, RelayGateway, ReplyBody,
+    Shortfall, Stage, UnreadableThreshold, MAX_IDEMPOTENCY_KEY_LEN,
 };
 use router::ports::ByteStream;
 use runtime::errors::Rejection;
@@ -17,8 +17,8 @@ use runtime::events::{ActualCost, SettlementCapped, UsageUnreadable};
 use runtime::model::Reply;
 use runtime::ports::Gateway;
 use support::{
-    block_on, chunk, gpt_price, lock, stack, stack_with, Event, Hold, HoldState, PriceError,
-    Script, Stack, Step, Unsupported, ACCOUNT, BALANCE, KEY, KEY_ID, MAX_OUTPUT, NOW,
+    block_on, chunk, config, gpt_price, lock, stack, stack_with, Event, Hold, HoldState,
+    PriceError, Script, Stack, Step, Unsupported, ACCOUNT, BALANCE, KEY, KEY_ID, MAX_OUTPUT, NOW,
 };
 
 type Outcome = Result<Reply<ReplyBody>, GatewayError<Unsupported, PriceError>>;
@@ -199,7 +199,7 @@ fn limited(spend: Option<SpendLimit>, per_minute: Option<u32>) -> RelayGateway<S
             spend,
             requests_per_minute: per_minute.map(RequestsPerMinute),
         }),
-        3,
+        config(3),
     )
 }
 
@@ -211,7 +211,7 @@ fn rejections_never_reach_upstream_or_hold() {
         GatewayError::Rejected(Rejection::Unauthenticated)
     );
     assert_eq!(
-        rejected(&stack_with(None, 3), KEY, None, "gpt"),
+        rejected(&stack_with(None, config(3)), KEY, None, "gpt"),
         GatewayError::Rejected(Rejection::UnknownKey)
     );
     assert_eq!(
@@ -352,7 +352,9 @@ fn storage_failures_before_upstream_are_errors() {
         .into_iter()
         .filter_map(|event| match event {
             Event::Fault(fault) => Some(fault.stage),
-            Event::Unreadable(_) | Event::Capped(..) | Event::MeterFailed(_) => None,
+            Event::Unreadable(_) | Event::Ratio(_) | Event::Capped(..) | Event::MeterFailed(_) => {
+                None
+            }
         })
         .collect();
     assert_eq!(stages, [Stage::Hold]);
@@ -862,6 +864,49 @@ fn non_success_status_releases_and_forwards_the_body() {
         Script::Reply(299, vec![chunk("usage:1,0,1"), chunk("done")]),
     );
     settled(&gateway, gpt_price(1, 0, 1));
+}
+
+#[test]
+fn unreadable_ratio_follows_each_outcome() {
+    let Ok(threshold) = UnreadableThreshold::new(2, 1, 2) else {
+        panic!("threshold");
+    };
+    let gateway = stack_with(
+        Some(KeyLimit {
+            spend: None,
+            requests_per_minute: None,
+        }),
+        GatewayConfig {
+            unreadable_threshold: threshold,
+            ..config(3)
+        },
+    );
+    for unread in [true, true, true, false, false, false] {
+        let body = if unread { "done" } else { "usage:1,0,1" };
+        let mut steps = vec![chunk(body)];
+        if !unread {
+            steps.push(chunk("done"));
+        }
+        run(&gateway, Script::Reply(200, steps));
+    }
+    gateway.services().upstream.push(Script::Fail);
+    let Err(GatewayError::Upstream) = call(&gateway, None, "gpt") else {
+        panic!("upstream should fail");
+    };
+    gateway.services().threads.join();
+    run(&gateway, Script::Reply(200, vec![chunk("done")]));
+    let mut ratios = Vec::new();
+    for event in gateway.services().report.events() {
+        if let Event::Ratio(event) = event {
+            ratios.push((event.decided, event.unreadable, event.window, event.at));
+        }
+    }
+    assert_eq!(
+        ratios,
+        [(2, 2, 2, UnixMillis(NOW)), (8, 4, 2, UnixMillis(NOW))]
+    );
+    assert_eq!(gateway.services().wallet.revenue(), gpt_price(1, 0, 1) * 3);
+    gateway.services().wallet.check_books();
 }
 
 #[test]

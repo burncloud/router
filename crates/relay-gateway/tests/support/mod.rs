@@ -22,7 +22,7 @@ use kernel::model::{AccountId, Currency, KeyId, ModelId, Money, RequestId, UnixM
 use kernel::ports::Clock;
 use relay_gateway::{
     Fault, GatewayConfig, MeterFailed, PriceSource, RelayGateway, Report, RequestIds, Services,
-    Shortfall, Spawn,
+    Shortfall, Spawn, UnreadableThreshold, UsageUnreadableRatio,
 };
 use router::model::{Prepared, UpstreamReply};
 use router::ports::{Adapter, ByteStream, Upstream, UsageMeter};
@@ -115,6 +115,7 @@ impl Spawn for Threads {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Unreadable(UsageUnreadable),
+    Ratio(UsageUnreadableRatio),
     Capped(SettlementCapped, Shortfall),
     MeterFailed(MeterFailed),
     Fault(Fault),
@@ -134,6 +135,10 @@ impl Recorder {
 impl Report for Recorder {
     fn usage_unreadable(&self, event: &UsageUnreadable) {
         lock(&self.events).push(Event::Unreadable(event.clone()));
+    }
+
+    fn usage_unreadable_ratio(&self, event: &UsageUnreadableRatio) {
+        lock(&self.events).push(Event::Ratio(*event));
     }
 
     fn settlement_capped(&self, event: &SettlementCapped, shortfall: Shortfall) {
@@ -1053,10 +1058,11 @@ pub fn config(attempts: u32) -> GatewayConfig {
         channel_capacity: NonZeroUsize::MIN,
         settle_attempts: NonZeroU32::new(attempts).unwrap_or(NonZeroU32::MIN),
         retry_delay: Duration::from_millis(7),
+        unreadable_threshold: UnreadableThreshold::DEFAULT,
     }
 }
 
-pub fn stack_with(limit: Option<KeyLimit>, attempts: u32) -> RelayGateway<Stack> {
+pub fn stack_with(limit: Option<KeyLimit>, settings: GatewayConfig) -> RelayGateway<Stack> {
     let wallet = LedgerWallet::default();
     wallet.deposit(ACCOUNT, BALANCE);
     wallet.clock.store(NOW, Ordering::SeqCst);
@@ -1071,7 +1077,7 @@ pub fn stack_with(limit: Option<KeyLimit>, attempts: u32) -> RelayGateway<Stack>
         threads: Threads::default(),
         ids: Counter::default(),
         report: Recorder::default(),
-        config: config(attempts),
+        config: settings,
     })
 }
 
@@ -1081,6 +1087,6 @@ pub fn stack() -> RelayGateway<Stack> {
             spend: None,
             requests_per_minute: None,
         }),
-        3,
+        config(3),
     )
 }
