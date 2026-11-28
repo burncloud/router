@@ -119,3 +119,11 @@ impl UsageMeter for OpenAiMeter {
         }
     }
 }
+
+const _: () = {
+    const fn assert_auto_traits<
+        T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe,
+    >() {
+    }
+    assert_auto_traits::<OpenAiMeter>();
+};

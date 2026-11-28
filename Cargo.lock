@@ -85,6 +85,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 
 [[package]]
+name = "identity"
+version = "0.3.0"
+source = "git+https://github.com/burncloud/next?rev=881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9#881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9"
+dependencies = [
+ "kernel",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,6 +206,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
+name = "relay-gateway"
+version = "0.1.0"
+dependencies = [
+ "billing",
+ "identity",
+ "kernel",
+ "proptest",
+ "router",
+ "runtime",
+ "thiserror",
+]
+
+[[package]]
 name = "relay-openai"
 version = "0.1.0"
 dependencies = [
@@ -216,6 +237,17 @@ version = "0.3.0"
 source = "git+https://github.com/burncloud/next?rev=881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9#881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9"
 dependencies = [
  "billing",
+]
+
+[[package]]
+name = "runtime"
+version = "0.3.0"
+source = "git+https://github.com/burncloud/next?rev=881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9#881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9"
+dependencies = [
+ "billing",
+ "identity",
+ "kernel",
+ "router",
 ]
 
 [[package]]
