@@ -5,7 +5,6 @@ mod channel;
 mod error;
 mod gateway;
 mod period;
-mod ports;
 mod ratio;
 mod task;
 
@@ -13,14 +12,57 @@ pub use channel::{BodyInterrupted, ReplyBody};
 pub use error::GatewayError;
 pub use gateway::{GatewayConfig, RelayGateway, Services, MAX_IDEMPOTENCY_KEY_LEN};
 pub use period::since;
-pub use ports::{
-    Fault, MeterFailed, PriceSource, Report, RequestIds, Shortfall, Spawn, Stage,
-    UsageUnreadableRatio,
-};
 pub use ratio::{InvalidUnreadableThreshold, UnreadableThreshold};
+pub use runtime::events::{Fault, MeterFailed, Shortfall, Stage, UsageUnreadableRatio};
+pub use runtime::ports::{PriceSource, Report, RequestIds, Spawn};
 
 #[cfg(test)]
 mod manifest {
+    use kernel::model::{AccountId, Currency, KeyId, Money, RequestId, UnixMillis};
+
+    #[test]
+    fn assembly_ports_are_the_next_contract() {
+        let stage: crate::Stage = runtime::events::Stage::Prices;
+        assert_eq!(stage, crate::Stage::Prices);
+        let shortfall: crate::Shortfall = runtime::events::Shortfall::Minor(2);
+        assert_eq!(shortfall, crate::Shortfall::Minor(2));
+        let at = UnixMillis(1);
+        let request = RequestId(String::from("r"));
+        let account = AccountId(String::from("a"));
+        let key = KeyId(String::from("k"));
+        let ratio = runtime::events::UsageUnreadableRatio {
+            decided: 4,
+            unreadable: 1,
+            window: 100,
+            ratio_num: 1,
+            ratio_den: 100,
+            at,
+        };
+        let same_ratio: crate::UsageUnreadableRatio = ratio;
+        assert_eq!(same_ratio, ratio);
+        let fault = runtime::events::Fault {
+            stage: runtime::events::Stage::Hold,
+            request: Some(request.clone()),
+            account: Some(account.clone()),
+            attempts: 1,
+            detail: String::from("x"),
+        };
+        let same_fault: crate::Fault = fault.clone();
+        assert_eq!(same_fault, fault);
+        let failed = runtime::events::MeterFailed {
+            request,
+            account,
+            key,
+            held: Money {
+                currency: Currency::Usd,
+                minor_units: 3,
+            },
+            at,
+        };
+        let same_failed: crate::MeterFailed = failed.clone();
+        assert_eq!(same_failed, failed);
+    }
+
     #[test]
     fn dependencies_stay_pure() {
         let manifest = include_str!("../Cargo.toml");

@@ -35,7 +35,7 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 
 ## relay-gateway
 
-`RelayGateway::new` 接收一个实现 `Services` 的结构体，里面是 next 的各个端口（`ApiKeys`、`RateLimiter`、`Adapter`、`Upstream`、`Wallet`、`Clock`）和本 crate 定义的四个端口：
+`RelayGateway::new` 接收一个实现 `Services` 的结构体，里面是 next 的各个端口（`ApiKeys`、`RateLimiter`、`Adapter`、`Upstream`、`Wallet`、`Clock`，以及 `runtime` 的 `Spawn`、`PriceSource`、`RequestIds`、`Report`）。本 crate 再导出这四个组装端口，定义以 next 为准：
 
 - `Spawn`：执行后台任务和重试等待，`relay-server` 用 tokio 实现。
 - `PriceSource`：每个请求取一次价格快照，冻结和结算用同一份。

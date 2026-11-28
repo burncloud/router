@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use kernel::model::UnixMillis;
 
-use crate::ports::UsageUnreadableRatio;
+use runtime::events::UsageUnreadableRatio;
 
 /// 已决请求里读不出用量的告警阈值：窗口、分子、分母。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

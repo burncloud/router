@@ -15,20 +15,20 @@ use std::time::Duration;
 
 use billing::errors::{BillingRejection, WalletError};
 use billing::model::{
-    Direction, Entry, EntryRef, HoldId, KeyCap, LedgerAccount, ModelUsage, TokenUsage,
+    Direction, Entry, EntryRef, HoldId, KeyCap, LedgerAccount, ModelUsage, PendingHold, TokenUsage,
 };
 use billing::ports::{Pricing, Wallet};
 use identity::model::{Admission, KeyLimit, Principal, RequestsPerMinute};
 use identity::ports::{ApiKeys, RateLimiter};
 use kernel::model::{AccountId, Currency, KeyId, ModelId, Money, RequestId, UnixMillis};
 use kernel::ports::Clock;
-use relay_gateway::{
-    Fault, GatewayConfig, MeterFailed, PriceSource, RelayGateway, Report, RequestIds, Services,
-    Shortfall, Spawn, UnreadableThreshold, UsageUnreadableRatio,
-};
+use relay_gateway::{GatewayConfig, RelayGateway, Services, UnreadableThreshold};
 use router::model::{Prepared, UpstreamReply};
 use router::ports::{Adapter, ByteStream, Upstream, UsageMeter};
-use runtime::events::{SettlementCapped, UsageUnreadable};
+use runtime::events::{
+    Fault, MeterFailed, SettlementCapped, Shortfall, UsageUnreadable, UsageUnreadableRatio,
+};
+use runtime::ports::{PriceSource, Report, RequestIds, Spawn};
 
 pub const KEY: &str = "sk-test";
 pub const ACCOUNT: &str = "acct-1";
@@ -575,7 +575,7 @@ pub struct Hold {
 struct Books {
     available: HashMap<AccountId, u64>,
     deposits: u64,
-    holds: HashMap<(AccountId, RequestId), (KeyId, HoldId, Hold)>,
+    holds: HashMap<(AccountId, RequestId), (KeyId, HoldId, Hold, UnixMillis)>,
     entries: Vec<Entry>,
 }
 
@@ -636,7 +636,7 @@ impl LedgerWallet {
         let mut holds: Vec<_> = lock(&self.books)
             .holds
             .iter()
-            .map(|((_, request), (_, _, hold))| (request.clone(), *hold))
+            .map(|((_, request), (_, _, hold, _))| (request.clone(), *hold))
             .collect();
         holds.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
         holds
@@ -669,8 +669,8 @@ impl LedgerWallet {
         let held: u64 = books
             .holds
             .values()
-            .filter(|(_, _, hold)| hold.state == HoldState::Open)
-            .map(|(_, _, hold)| hold.amount.minor_units)
+            .filter(|(_, _, hold, _)| hold.state == HoldState::Open)
+            .map(|(_, _, hold, _)| hold.amount.minor_units)
             .sum();
         let revenue = sum(&books.entries, &LedgerAccount::Revenue, Direction::Credit);
         assert_eq!(available + held + revenue, books.deposits);
@@ -752,8 +752,8 @@ impl Wallet for LedgerWallet {
                 let spent: u64 = books
                     .holds
                     .values()
-                    .filter(|(holder, _, _)| holder == key)
-                    .map(|(_, _, hold)| match hold.state {
+                    .filter(|(holder, _, _, _)| holder == key)
+                    .map(|(_, _, hold, _)| match hold.state {
                         HoldState::Open => hold.amount.minor_units,
                         HoldState::Settled(actual) => actual,
                         HoldState::Released => 0,
@@ -786,6 +786,7 @@ impl Wallet for LedgerWallet {
                         amount,
                         state: HoldState::Open,
                     },
+                    UnixMillis(at),
                 ),
             );
             Self::entry(
@@ -828,7 +829,7 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Storage(StoreDown));
             }
             let mut books = lock(&self.books);
-            let Some((key, id, hold)) = books
+            let Some((key, id, hold, created_at)) = books
                 .holds
                 .get(&(account.clone(), request.clone()))
                 .cloned()
@@ -863,6 +864,7 @@ impl Wallet for LedgerWallet {
                         amount: hold.amount,
                         state: HoldState::Settled(amount.minor_units),
                     },
+                    created_at,
                 ),
             );
             Self::entry(
@@ -916,7 +918,7 @@ impl Wallet for LedgerWallet {
                 return Err(WalletError::Storage(StoreDown));
             }
             let mut books = lock(&self.books);
-            let Some((key, id, hold)) = books
+            let Some((key, id, hold, created_at)) = books
                 .holds
                 .get(&(account.clone(), request.clone()))
                 .cloned()
@@ -945,6 +947,7 @@ impl Wallet for LedgerWallet {
                         amount: hold.amount,
                         state: HoldState::Released,
                     },
+                    created_at,
                 ),
             );
             Self::entry(
@@ -981,7 +984,7 @@ impl Wallet for LedgerWallet {
         let result = lock(&self.books)
             .holds
             .get(&(account.clone(), request.clone()))
-            .map(|(_, _, hold)| match hold.state {
+            .map(|(_, _, hold, _)| match hold.state {
                 HoldState::Open => hold.amount,
                 HoldState::Settled(_) | HoldState::Released => usd(0),
             })
@@ -998,14 +1001,45 @@ impl Wallet for LedgerWallet {
         let spent = lock(&self.books)
             .holds
             .values()
-            .filter(|(holder, _, _)| holder == key)
-            .map(|(_, _, hold)| match hold.state {
+            .filter(|(holder, _, _, _)| holder == key)
+            .map(|(_, _, hold, _)| match hold.state {
                 HoldState::Open => hold.amount.minor_units,
                 HoldState::Settled(actual) => actual,
                 HoldState::Released => 0,
             })
             .sum();
         ready(Ok(usd(spent)))
+    }
+
+    fn open_holds_created_before(
+        &self,
+        cutoff: UnixMillis,
+    ) -> impl Future<Output = Result<Vec<PendingHold>, WalletError<StoreDown>>> + Send {
+        let mut open = Vec::new();
+        {
+            let books = lock(&self.books);
+            for ((account, request), (key, hold_id, hold, created_at)) in &books.holds {
+                if hold.state == HoldState::Open && *created_at < cutoff {
+                    open.push(PendingHold {
+                        hold: hold_id.clone(),
+                        account: account.clone(),
+                        request: request.clone(),
+                        key: key.clone(),
+                        amount: hold.amount,
+                        created_at: *created_at,
+                    });
+                }
+            }
+        }
+        open.sort_by(|left, right| {
+            left.created_at.cmp(&right.created_at).then_with(|| {
+                left.account
+                    .0
+                    .cmp(&right.account.0)
+                    .then_with(|| left.request.0.cmp(&right.request.0))
+            })
+        });
+        ready(Ok(open))
     }
 }
 

@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use billing::errors::BillingRejection;
 use billing::model::KeyCap;
+use billing::ports::Wallet;
 use identity::model::{KeyLimit, LimitPeriod, RequestsPerMinute, SpendLimit};
 use kernel::model::{AccountId, Currency, KeyId, Money, RequestId, UnixMillis};
 use relay_gateway::{
     since, BodyInterrupted, Fault, GatewayConfig, GatewayError, MeterFailed, RelayGateway,
-    ReplyBody, Shortfall, Stage, UnreadableThreshold, MAX_IDEMPOTENCY_KEY_LEN,
+    ReplyBody, Services, Shortfall, Stage, UnreadableThreshold, MAX_IDEMPOTENCY_KEY_LEN,
 };
 use router::ports::ByteStream;
 use runtime::errors::Rejection;
@@ -405,6 +406,15 @@ fn hold_storage_then_missing_hold_is_not_a_release_fault() {
     assert_eq!(calls(&gateway), (0, 0));
     assert_eq!(gateway.services().wallet.available(ACCOUNT), BALANCE);
     assert_eq!(gateway.services().wallet.revenue(), 0);
+    assert_eq!(
+        block_on(
+            gateway
+                .services()
+                .wallet
+                .open_holds_created_before(UnixMillis(u64::MAX))
+        ),
+        Ok(Vec::new())
+    );
     gateway.services().wallet.check_books();
 }
 
@@ -701,6 +711,55 @@ fn normal_end_without_usage_stays_pending() {
         [(b"up:gpt".to_vec(), false)]
     );
     unreadable(&gateway);
+}
+
+#[test]
+fn pending_hold_is_listed_with_the_hold_id() {
+    let gateway = stack();
+    run(&gateway, Script::Reply(200, vec![chunk("done")]));
+    unreadable(&gateway);
+    let wallet = &gateway.services().wallet;
+    assert_eq!(
+        block_on(wallet.open_holds_created_before(UnixMillis(NOW))),
+        Ok(Vec::new())
+    );
+    let Ok(listed) = block_on(wallet.open_holds_created_before(UnixMillis(NOW + 1))) else {
+        panic!("pending hold was not listed");
+    };
+    assert_eq!(listed.len(), 1);
+    let Some(pending) = listed.first() else {
+        panic!("pending hold was not listed");
+    };
+    let (request, account, key) = principal_fields();
+    assert_eq!(pending.request, request);
+    assert_eq!(pending.account, account);
+    assert_eq!(pending.key, key);
+    assert_eq!(pending.amount, usd(HELD));
+    assert_eq!(pending.created_at, UnixMillis(NOW));
+    assert_eq!(
+        block_on(wallet.settle(
+            &pending.account,
+            &pending.request,
+            &pending.hold,
+            pending.amount,
+        )),
+        Ok(())
+    );
+    settled(&gateway, HELD);
+}
+
+#[test]
+fn assembly_traits_are_the_next_contract() {
+    fn assert_spawn(_: &impl runtime::ports::Spawn) {}
+    fn assert_prices(_: &impl runtime::ports::PriceSource) {}
+    fn assert_ids(_: &impl runtime::ports::RequestIds) {}
+    fn assert_report(_: &impl runtime::ports::Report) {}
+    let gateway = stack();
+    let services = gateway.services();
+    assert_spawn(services.spawner());
+    assert_prices(services.prices());
+    assert_ids(services.ids());
+    assert_report(services.report());
 }
 
 #[test]
