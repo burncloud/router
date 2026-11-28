@@ -1,2 +1,4 @@
 /target
 .burncloud-ci/
+/mutants.out/
+/mutants.out.old/

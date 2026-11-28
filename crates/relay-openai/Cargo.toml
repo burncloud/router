@@ -1,0 +1,22 @@
+[package]
+name = "relay-openai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "BurnCloud 中转的 OpenAI chat completions 协议纯逻辑。"
+
+[dependencies]
+billing = { git = "https://github.com/burncloud/next", rev = "881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9", version = "=0.3.0" }
+kernel = { git = "https://github.com/burncloud/next", rev = "881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9", version = "=0.3.0" }
+router = { git = "https://github.com/burncloud/next", rev = "881b3db82b8e4eb5dbbb3abcf6e8ab8562dc94c9", version = "=0.3.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order", "arbitrary_precision"] }
+thiserror = "=2.0.21"
+
+[dev-dependencies]
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

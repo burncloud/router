@@ -1,0 +1,21 @@
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[[bans.deny]]
+name = "sqlx"
+
+[[bans.deny]]
+name = "tokio"
+
+[[bans.deny]]
+name = "reqwest"
+
+[[bans.deny]]
+name = "axum"
+
+[[bans.deny]]
+name = "hyper"
+
+[[bans.deny]]
+name = "postgres"
