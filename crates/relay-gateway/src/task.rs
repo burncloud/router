@@ -9,11 +9,13 @@ use identity::model::Principal;
 use kernel::model::{ModelId, Money, RequestId, UnixMillis};
 use kernel::ports::Clock;
 use router::ports::{Adapter, ByteStream, Upstream, UsageMeter};
-use runtime::events::{ActualCost, SettlementCapped, UsageUnreadable};
+use runtime::events::{
+    ActualCost, Fault, MeterFailed, SettlementCapped, Shortfall, Stage, UsageUnreadable,
+};
+use runtime::ports::{PriceSource, Report, Spawn};
 
 use crate::channel::{Message, Sender};
 use crate::gateway::Services;
-use crate::ports::{Fault, MeterFailed, PriceSource, Report, Shortfall, Spawn, Stage};
 use crate::ratio::Watch;
 
 type Meter<S> = <<S as Services>::Adapter as Adapter>::Meter;
@@ -274,7 +276,7 @@ mod tests {
     use runtime::events::ActualCost;
 
     use super::capped;
-    use crate::ports::Shortfall;
+    use runtime::events::Shortfall;
 
     fn money(currency: Currency, minor_units: u64) -> Money {
         Money {

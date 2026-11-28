@@ -8,11 +8,11 @@ publish.workspace = true
 description = "BurnCloud 中转的请求编排：鉴权、冻结、转发、结算。只依赖 next 的契约。"
 
 [dependencies]
-billing = { git = "https://github.com/burncloud/next", rev = "7378f99546791c16ee95b6c0dc832526e4b31592", version = "=0.5.0" }
-identity = { git = "https://github.com/burncloud/next", rev = "7378f99546791c16ee95b6c0dc832526e4b31592", version = "=0.5.0" }
-kernel = { git = "https://github.com/burncloud/next", rev = "7378f99546791c16ee95b6c0dc832526e4b31592", version = "=0.5.0" }
-router = { git = "https://github.com/burncloud/next", rev = "7378f99546791c16ee95b6c0dc832526e4b31592", version = "=0.5.0" }
-runtime = { git = "https://github.com/burncloud/next", rev = "7378f99546791c16ee95b6c0dc832526e4b31592", version = "=0.5.0" }
+billing = { git = "https://github.com/burncloud/next", rev = "d7df14eea60ee84a5cf88b6fc681219c0d53abc6", version = "=0.6.0" }
+identity = { git = "https://github.com/burncloud/next", rev = "d7df14eea60ee84a5cf88b6fc681219c0d53abc6", version = "=0.5.0" }
+kernel = { git = "https://github.com/burncloud/next", rev = "d7df14eea60ee84a5cf88b6fc681219c0d53abc6", version = "=0.5.0" }
+router = { git = "https://github.com/burncloud/next", rev = "d7df14eea60ee84a5cf88b6fc681219c0d53abc6", version = "=0.5.0" }
+runtime = { git = "https://github.com/burncloud/next", rev = "d7df14eea60ee84a5cf88b6fc681219c0d53abc6", version = "=0.5.0" }
 thiserror = "=2.0.21"
 
 [dev-dependencies]

@@ -12,13 +12,13 @@ use kernel::model::{AccountId, Currency, RequestId};
 use kernel::ports::Clock;
 use router::ports::{Adapter, Upstream};
 use runtime::errors::Rejection;
+use runtime::events::{Fault, Stage};
 use runtime::model::Reply;
-use runtime::ports::Gateway;
+use runtime::ports::{Gateway, PriceSource, Report, RequestIds, Spawn};
 
 use crate::channel::{channel, Message, ReplyBody};
 use crate::error::GatewayError;
 use crate::period::since;
-use crate::ports::{Fault, PriceSource, Report, RequestIds, Spawn, Stage};
 use crate::ratio::{UnreadableThreshold, Watch};
 use crate::task::{relay, Job};
 

@@ -10,8 +10,8 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "billing"
-version = "0.5.0"
-source = "git+https://github.com/burncloud/next?rev=7378f99546791c16ee95b6c0dc832526e4b31592#7378f99546791c16ee95b6c0dc832526e4b31592"
+version = "0.6.0"
+source = "git+https://github.com/burncloud/next?rev=d7df14eea60ee84a5cf88b6fc681219c0d53abc6#d7df14eea60ee84a5cf88b6fc681219c0d53abc6"
 dependencies = [
  "kernel",
 ]
@@ -87,7 +87,7 @@ checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 [[package]]
 name = "identity"
 version = "0.5.0"
-source = "git+https://github.com/burncloud/next?rev=7378f99546791c16ee95b6c0dc832526e4b31592#7378f99546791c16ee95b6c0dc832526e4b31592"
+source = "git+https://github.com/burncloud/next?rev=d7df14eea60ee84a5cf88b6fc681219c0d53abc6#d7df14eea60ee84a5cf88b6fc681219c0d53abc6"
 dependencies = [
  "kernel",
 ]
@@ -111,7 +111,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 [[package]]
 name = "kernel"
 version = "0.5.0"
-source = "git+https://github.com/burncloud/next?rev=7378f99546791c16ee95b6c0dc832526e4b31592#7378f99546791c16ee95b6c0dc832526e4b31592"
+source = "git+https://github.com/burncloud/next?rev=d7df14eea60ee84a5cf88b6fc681219c0d53abc6#d7df14eea60ee84a5cf88b6fc681219c0d53abc6"
 
 [[package]]
 name = "libc"
@@ -234,7 +234,7 @@ dependencies = [
 [[package]]
 name = "router"
 version = "0.5.0"
-source = "git+https://github.com/burncloud/next?rev=7378f99546791c16ee95b6c0dc832526e4b31592#7378f99546791c16ee95b6c0dc832526e4b31592"
+source = "git+https://github.com/burncloud/next?rev=d7df14eea60ee84a5cf88b6fc681219c0d53abc6#d7df14eea60ee84a5cf88b6fc681219c0d53abc6"
 dependencies = [
  "billing",
 ]
@@ -242,7 +242,7 @@ dependencies = [
 [[package]]
 name = "runtime"
 version = "0.5.0"
-source = "git+https://github.com/burncloud/next?rev=7378f99546791c16ee95b6c0dc832526e4b31592#7378f99546791c16ee95b6c0dc832526e4b31592"
+source = "git+https://github.com/burncloud/next?rev=d7df14eea60ee84a5cf88b6fc681219c0d53abc6#d7df14eea60ee84a5cf88b6fc681219c0d53abc6"
 dependencies = [
  "billing",
  "identity",
