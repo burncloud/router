@@ -8,6 +8,7 @@ BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/ne
 
 | crate | 内容 |
 | --- | --- |
+| `crates/relay-gateway` | 请求编排，实现 next 的 `runtime::ports::Gateway`：鉴权、限流、冻结、调用上游、边读边转发、结算。只依赖 next 的契约，没有 IO，执行器由调用方注入 |
 | `crates/relay-openai` | OpenAI chat completions 协议的纯逻辑，实现 next 的 `router::ports::Adapter` 和 `UsageMeter`。没有 IO |
 
 `baseline/harness`、`baseline/tool` 是旧中转的行为基线，各自是独立的 workspace，不在根 workspace 里，说明见 `baseline/README.md`。
@@ -25,11 +26,32 @@ BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/ne
 `UsageMeter`：
 
 - 流式按 SSE 行在字节层面跨块切分，`\n` 和 `\r\n` 都认，不做有损解码。`"usage": null` 跳过，出现两次非空 usage、`[DONE]` 之后还有数据、上游的 error 事件、响应里 `service_tier` 不是 `default`，都返回错误。读到 `data: [DONE]` 加空行后 `ended()` 为真。
-- 非流式读完整个响应体后取顶层 `usage`，响应体是完整 JSON 时 `ended()` 为真。
+- 非流式读完整个响应体后取顶层 `usage`，响应体是完整 JSON 时 `ended()` 为真。这个结果在两次 `feed` 之间只算一次。
 - 用量字段集合固定：`prompt_tokens`、`completion_tokens`、`total_tokens`、`prompt_tokens_details.{cached_tokens,audio_tokens}`、`completion_tokens_details.{reasoning_tokens,audio_tokens,accepted_prediction_tokens,rejected_prediction_tokens}`。缺字段、多字段、不是 u64、`total_tokens` 不等于两项之和、缓存数大于输入、推理数大于输出、audio 或 prediction 不为 0，都返回错误，不按 0 处理。
 - 换算：`input_tokens = prompt_tokens - cached_tokens`，`cached_input_tokens = cached_tokens`，`output_tokens = completion_tokens`。
 
 IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清单。
+
+## relay-gateway
+
+`RelayGateway::new` 接收一个实现 `Services` 的结构体，里面是 next 的各个端口（`ApiKeys`、`RateLimiter`、`Adapter`、`Upstream`、`Wallet`、`Clock`）和本 crate 定义的四个端口：
+
+- `Spawn`：执行后台任务和重试等待，`relay-server` 用 tokio 实现。
+- `PriceSource`：每个请求取一次价格快照，冻结和结算用同一份。
+- `RequestIds`：请求没带 `Idempotency-Key` 时生成 `RequestId`。带了就直接用，要求 1 到 255 个可见 ASCII 字符。
+- `Report`：`UsageUnreadable`、`SettlementCapped`（附带差额 `Shortfall`）和存储故障，首期写结构化日志。
+
+`handle` 的顺序：认证，读 key 限额，有 `requests_per_minute` 才限流，确定 `RequestId`，`prepare`，取价格快照并按上限计价，冻结。冻结额不是 USD 或为 0 时拒绝，不冻结。key 的花费限额转成 `KeyCap`，`Daily`、`Monthly` 从 UTC 自然日、自然月起点算。
+
+冻结成功后，「调用上游、读完、结算」整段交给 `Spawn`，字节经有界通道交给 `Reply::body`。结局只有一个：
+
+- 读到用量（包括上游没正常结束但已经给了用量）：按同一份快照计价并 `settle`。实际额超过冻结额或计价溢出时按冻结额结算，并报 `SettlementCapped`。
+- 上游正常结束（`ByteStream` 读完且 `UsageMeter::ended` 为真）但读不出用量：不结算也不释放，冻结挂起等对账，报 `UsageUnreadable`。
+- 上游没正常结束且没有用量、响应头之前失败、非 2xx：`release`，不扣费。非 2xx 的响应体照常转发。
+
+客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障，已经调过上游后不会因为内部错误去 `release`。
+
+IO 依赖和 `relay-openai` 由 `crates/relay-gateway/bans.toml` 和清单测试禁止。
 
 ## 本地复现
 
