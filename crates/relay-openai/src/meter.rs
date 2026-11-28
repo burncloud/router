@@ -211,6 +211,12 @@ mod buffer_limit {
         let stream = OpenAiMeter::new(true);
         assert_eq!(whole.limit, MAX_BUFFER_BYTES);
         assert_eq!(stream.limit, MAX_BUFFER_BYTES);
+        match &stream.mode {
+            super::Mode::Stream(state) => {
+                assert_eq!(state.splitter.limit(), MAX_BUFFER_BYTES);
+            }
+            super::Mode::Whole(_) => panic!("expected stream mode"),
+        }
     }
 
     #[test]
@@ -271,13 +277,41 @@ mod buffer_limit {
     #[test]
     fn stream_line_over_the_limit_is_not_parsed() {
         let mut line = vec![b'x'; 9];
-        let mut meter = OpenAiMeter::with_limit(true, 8);
-        assert_eq!(meter.feed(&line), Err(MeterError::BufferLimitExceeded));
         line.extend_from_slice(&usage_and_done());
-        let mut later = OpenAiMeter::with_limit(true, 8);
-        assert_eq!(later.feed(&line), Err(MeterError::BufferLimitExceeded));
-        assert!(later.ended());
-        assert_eq!(later.finish(), Err(MeterError::BufferLimitExceeded));
+        let mut same_feed = OpenAiMeter::with_limit(true, 8);
+        assert_eq!(same_feed.feed(&line), Err(MeterError::BufferLimitExceeded));
+        assert!(same_feed.ended());
+        assert_eq!(same_feed.finish(), Err(MeterError::BufferLimitExceeded));
+    }
+
+    #[test]
+    fn stream_stops_accumulating_after_overflow() {
+        let mut meter = OpenAiMeter::with_limit(true, 8);
+        assert_eq!(meter.feed(&[b'x'; 9]), Err(MeterError::BufferLimitExceeded));
+        assert_eq!(
+            meter.feed(&usage_and_done()),
+            Err(MeterError::BufferLimitExceeded)
+        );
+        assert!(meter.ended());
+        assert_eq!(meter.finish(), Err(MeterError::BufferLimitExceeded));
+    }
+
+    #[test]
+    fn stream_line_at_the_limit_still_reads_usage() {
+        let event = format!(r#"data: {{"choices":[],"usage":{USAGE}}}"#);
+        let bytes = format!("{event}\n\ndata: [DONE]\n\n").into_bytes();
+        let meter = OpenAiMeter::with_limit(true, event.len());
+        assert_eq!(run(meter, &[&bytes]), (true, Ok(EXPECTED)));
+    }
+
+    #[test]
+    fn stream_joined_data_at_the_limit_still_reads_usage() {
+        let prefix = r#"{"choices":[],"#;
+        let suffix = format!(r#""usage":{USAGE}}}"#);
+        let joined_len = prefix.len() + 1 + suffix.len();
+        let bytes = format!("data: {prefix}\ndata: {suffix}\n\ndata: [DONE]\n\n").into_bytes();
+        let meter = OpenAiMeter::with_limit(true, joined_len);
+        assert_eq!(run(meter, &[&bytes]), (true, Ok(EXPECTED)));
     }
 
     #[test]
