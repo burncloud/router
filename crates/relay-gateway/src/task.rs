@@ -13,7 +13,7 @@ use runtime::events::{ActualCost, SettlementCapped, UsageUnreadable};
 
 use crate::channel::{Message, Sender};
 use crate::gateway::Services;
-use crate::ports::{Fault, PriceSource, Report, Shortfall, Spawn, Stage};
+use crate::ports::{Fault, MeterFailed, PriceSource, Report, Shortfall, Spawn, Stage};
 
 type Meter<S> = <<S as Services>::Adapter as Adapter>::Meter;
 type Prices<S> = <<S as Services>::Prices as PriceSource>::Prices;
@@ -73,6 +73,7 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
         release(services, &principal, &request).await;
     }
     let mut body = reply.body;
+    let mut meter_failed = false;
     let finished = loop {
         let chunk = match body.next_chunk().await {
             Some(Ok(bytes)) => Some(bytes),
@@ -84,7 +85,7 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
             break false;
         };
         if success {
-            let _ = meter.feed(&bytes);
+            meter_failed |= meter.feed(&bytes).is_err();
         }
         forward.send(Message::Chunk(bytes)).await;
     };
@@ -105,7 +106,18 @@ pub(crate) async fn relay<S: Services>(services: Arc<S>, job: Job<S>, sender: Se
             held,
             at: services.clock().now(),
         }),
-        None => release(services, &principal, &request).await,
+        None => {
+            if meter_failed {
+                services.report().meter_failed(&MeterFailed {
+                    request: request.clone(),
+                    account: principal.account.clone(),
+                    key: principal.key.clone(),
+                    held,
+                    at: services.clock().now(),
+                });
+            }
+            release(services, &principal, &request).await;
+        }
     }
 }
 

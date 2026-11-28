@@ -40,7 +40,7 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 - `Spawn`：执行后台任务和重试等待，`relay-server` 用 tokio 实现。
 - `PriceSource`：每个请求取一次价格快照，冻结和结算用同一份。
 - `RequestIds`：请求没带 `Idempotency-Key` 时生成 `RequestId`。带了就直接用，要求 1 到 255 个可见 ASCII 字符。
-- `Report`：`UsageUnreadable`、`SettlementCapped`（附带差额 `Shortfall`）和存储故障，首期写结构化日志。
+- `Report`：`UsageUnreadable`、`SettlementCapped`（附带差额 `Shortfall`）、`MeterFailed` 和存储故障，首期写结构化日志。
 
 `handle` 的顺序：认证，读 key 限额，有 `requests_per_minute` 才限流，确定 `RequestId`，`prepare`，取价格快照并按上限计价，冻结。冻结额不是 USD 或为 0 时拒绝，不冻结。key 的花费限额转成 `KeyCap`，`Daily`、`Monthly` 从 UTC 自然日、自然月起点算。
 
@@ -48,7 +48,7 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 
 - 读到用量（包括上游没正常结束但已经给了用量）：按同一份快照计价并 `settle`。实际额超过冻结额或计价溢出时按冻结额结算，并报 `SettlementCapped`。
 - 上游正常结束（`ByteStream` 读完且 `UsageMeter::ended` 为真）但读不出用量：不结算也不释放，冻结挂起等对账，报 `UsageUnreadable`。
-- 上游没正常结束且没有用量、响应头之前失败、非 2xx：`release`，不扣费。非 2xx 的响应体照常转发。
+- 上游没正常结束且没有用量、响应头之前失败、非 2xx：`release`，不扣费。其中 meter 已在 `feed` 中报错过的，释放前记一条 `MeterFailed`。非 2xx 的响应体照常转发。
 
 客户端丢弃 `Reply::body` 后停止转发，但继续读完上游并按上面的规则结算。`settle` 和 `release` 遇到存储失败按 `GatewayConfig::settle_attempts` 重试，用完仍失败就把冻结留给对账并报故障。重试时拿到 `AlreadySettled`（`settle`）或 `AlreadyReleased`（`release`）说明前一次其实已成功，按成功处理，不报故障。已经调过上游后不会因为内部错误去 `release`。
 

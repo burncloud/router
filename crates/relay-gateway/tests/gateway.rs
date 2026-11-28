@@ -8,7 +8,7 @@ use billing::model::KeyCap;
 use identity::model::{KeyLimit, LimitPeriod, RequestsPerMinute, SpendLimit};
 use kernel::model::{AccountId, Currency, KeyId, Money, RequestId, UnixMillis};
 use relay_gateway::{
-    since, BodyInterrupted, GatewayError, RelayGateway, ReplyBody, Shortfall, Stage,
+    since, BodyInterrupted, GatewayError, MeterFailed, RelayGateway, ReplyBody, Shortfall, Stage,
     MAX_IDEMPOTENCY_KEY_LEN,
 };
 use router::ports::ByteStream;
@@ -352,7 +352,7 @@ fn storage_failures_before_upstream_are_errors() {
         .into_iter()
         .filter_map(|event| match event {
             Event::Fault(fault) => Some(fault.stage),
-            Event::Unreadable(_) | Event::Capped(..) => None,
+            Event::Unreadable(_) | Event::Capped(..) | Event::MeterFailed(_) => None,
         })
         .collect();
     assert_eq!(stages, [Stage::Hold]);
@@ -415,6 +415,7 @@ fn broken_stream_without_usage_releases() {
     assert_eq!(chunks, ["a"]);
     assert!(interrupted);
     released_without_charge(&gateway);
+    assert_eq!(gateway.services().report.events(), []);
 }
 
 #[test]
@@ -425,6 +426,59 @@ fn eof_without_done_or_usage_releases() {
     assert_eq!(chunks, ["a"]);
     assert!(!interrupted);
     released_without_charge(&gateway);
+    assert_eq!(gateway.services().report.events(), []);
+}
+
+fn released_after_meter_failure(gateway: &RelayGateway<Stack>) {
+    released_without_charge(gateway);
+    let (request, account, key) = principal_fields();
+    assert_eq!(
+        gateway.services().report.events(),
+        [Event::MeterFailed(MeterFailed {
+            request,
+            account,
+            key,
+            held: usd(HELD),
+            at: UnixMillis(NOW),
+        })]
+    );
+}
+
+#[test]
+fn meter_failure_then_broken_stream_releases_and_reports() {
+    let gateway = stack();
+    streaming(&gateway);
+    let (_, chunks, interrupted) = run(
+        &gateway,
+        Script::Reply(200, vec![chunk("a"), chunk("garbled"), Step::Break]),
+    );
+    assert_eq!(chunks, ["a", "garbled"]);
+    assert!(interrupted);
+    released_after_meter_failure(&gateway);
+}
+
+#[test]
+fn meter_failure_then_eof_without_done_releases_and_reports() {
+    let gateway = stack();
+    streaming(&gateway);
+    let (_, chunks, interrupted) = run(
+        &gateway,
+        Script::Reply(200, vec![chunk("a"), chunk("garbled")]),
+    );
+    assert_eq!(chunks, ["a", "garbled"]);
+    assert!(!interrupted);
+    released_after_meter_failure(&gateway);
+}
+
+#[test]
+fn duplicate_usage_then_broken_stream_releases_and_reports() {
+    let gateway = stack();
+    streaming(&gateway);
+    let script = vec![chunk("usage:5,1,20"), chunk("usage:5,1,20"), Step::Break];
+    let (_, chunks, interrupted) = run(&gateway, Script::Reply(200, script));
+    assert_eq!(chunks, ["usage:5,1,20", "usage:5,1,20"]);
+    assert!(interrupted);
+    released_after_meter_failure(&gateway);
 }
 
 #[test]
@@ -820,6 +874,8 @@ fn every_request_has_exactly_one_outcome() {
         ),
         Script::Reply(200, vec![chunk("usage:1,0,1"), Step::Break]),
         Script::Reply(200, vec![chunk("a"), Step::Break]),
+        Script::Reply(200, vec![chunk("garbled"), Step::Break]),
+        Script::Reply(200, vec![chunk("garbled")]),
         Script::Reply(200, vec![chunk("done"), chunk("done")]),
         Script::Reply(500, vec![chunk("usage:1,0,1"), chunk("done")]),
         Script::Fail,

@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use billing::model::ModelUsage;
 use billing::ports::Pricing;
-use kernel::model::{AccountId, RequestId};
+use kernel::model::{AccountId, KeyId, Money, RequestId, UnixMillis};
 use runtime::events::{SettlementCapped, UsageUnreadable};
 
 /// 客户端断开后仍要跑完的任务交给它，`relay-server` 用 tokio 实现。
@@ -64,11 +64,23 @@ pub struct Fault {
     pub detail: String,
 }
 
-/// 首期写结构化日志：`usage_unreadable` 和 `settlement_capped` 记 error 级，`fault` 记 error 级。
+/// meter 已在 `feed` 中报错，且上游未正常结束。计费仍是释放、不扣费。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MeterFailed {
+    pub request: RequestId,
+    pub account: AccountId,
+    pub key: KeyId,
+    pub held: Money,
+    pub at: UnixMillis,
+}
+
+/// 首期写结构化日志：`usage_unreadable`、`settlement_capped`、`meter_failed` 和 `fault` 记 error 级。
 pub trait Report: Send + Sync + 'static {
     fn usage_unreadable(&self, event: &UsageUnreadable);
 
     fn settlement_capped(&self, event: &SettlementCapped, shortfall: Shortfall);
+
+    fn meter_failed(&self, event: &MeterFailed);
 
     fn fault(&self, fault: &Fault);
 }
