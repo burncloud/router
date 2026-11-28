@@ -54,6 +54,10 @@ IO 依赖由 `crates/relay-openai/bans.toml` 禁止，`cargo test` 会核对清�
 
 `hold` 返回存储错误时，先报 `Stage::Hold`，再按同样的 `settle_attempts` 和 `retry_delay` 补一次 `release`，然后向客户端返回 `GatewayError::Storage`，不调用上游。这次释放把 `HoldNotFound` 和 `AlreadyReleased` 当成成功，第一次遇到也不报 `Release` 故障。其它拒绝，以及重试用尽后仍是存储失败，报 `Release` 故障。补偿释放的结果不改变返回给客户端的错误。
 
+### 已知限制
+
+客户端带了 `Idempotency-Key` 时，`RequestId` 就是这个 key。补偿 `release` 调用 `Wallet::release`，只按 `(account, request)` 定位，没有冻结归属令牌。同一账号用同一个 key 并发发两个请求时，若先到的已经冻结、后到的 `hold` 遇到存储错误，后者的补偿 `release` 可能释放先到请求的冻结。先到的请求结算时，`settle` 得到 `HoldNotFound` 或 `AlreadyReleased`，按 `Stage::Settle` 报故障，这次用量没有扣费。不会多扣该客户，也不影响其它账号。根治需要 `Wallet` 提供 hold 归属令牌（billing 接口变更，另行处理）。
+
 每个进入上游调用的请求，在结局确定时记一次已决：按用量结算、释放冻结、读不出用量而挂起，都算。只有正常结束但读不出用量、冻结保持挂起的那次同时记入读不出。`hold` 的存储错误发生在调用上游之前，不增加已决次数，也不记 `UsageUnreadable`。计数挂在 `RelayGateway` 上，从创建起累加，不按时间滑动，告警也不把计数清零。`GatewayConfig::unreadable_threshold` 默认是 `UnreadableThreshold::DEFAULT`：至少 100 次已决，且 `unreadable / decided` 大于等于 1/100。比较是 `unreadable * ratio_den >= decided * ratio_num`，两侧用 `u128`，不用浮点。`UnreadableThreshold::new` 在窗口为 0、分母为 0 或分子大于分母时返回错误。比例从低于阈值变成达到阈值时调用一次 `Report::usage_unreadable_ratio`，字段是 `decided`、`unreadable`、`window`、`ratio_num`、`ratio_den`、`at`。一直处于达到状态不重复调用；跌回阈值以下之后再次达到会再调用。边沿和计数在同一把锁里更新。
 
 IO 依赖和 `relay-openai` 由 `crates/relay-gateway/bans.toml` 和清单测试禁止。
