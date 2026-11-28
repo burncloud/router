@@ -3,7 +3,7 @@ use core::future::Future;
 use std::sync::Arc;
 
 use billing::errors::{BillingRejection, WalletError};
-use billing::model::ModelUsage;
+use billing::model::{HoldId, ModelUsage};
 use billing::ports::{Pricing, Wallet};
 use identity::model::Principal;
 use kernel::model::{ModelId, Money, RequestId, UnixMillis};
@@ -22,6 +22,7 @@ type Prices<S> = <<S as Services>::Prices as PriceSource>::Prices;
 pub(crate) struct Job<S: Services> {
     pub(crate) principal: Principal,
     pub(crate) request: RequestId,
+    pub(crate) hold_id: HoldId,
     pub(crate) held: Money,
     pub(crate) model: ModelId,
     pub(crate) upstream_body: Vec<u8>,
@@ -55,6 +56,7 @@ pub(crate) async fn relay<S: Services>(
     let Job {
         principal,
         request,
+        hold_id,
         held,
         model,
         upstream_body,
@@ -69,7 +71,7 @@ pub(crate) async fn relay<S: Services>(
         Ok(reply) => reply,
         Err(error) => {
             fault(services, Stage::Upstream, &principal, &request, 1, &error);
-            release(services, &principal, &request).await;
+            release(services, &principal, &request, &hold_id).await;
             forward.send(Message::Failed).await;
             count(services, watch, false, services.clock().now());
             return;
@@ -78,7 +80,7 @@ pub(crate) async fn relay<S: Services>(
     let success = (200..300).contains(&reply.status);
     forward.send(Message::Head(reply.status)).await;
     if !success {
-        release(services, &principal, &request).await;
+        release(services, &principal, &request, &hold_id).await;
     }
     let mut body = reply.body;
     let mut meter_failed = false;
@@ -106,7 +108,7 @@ pub(crate) async fn relay<S: Services>(
     match meter.finish().ok() {
         Some(tokens) => {
             let actual = prices.price(&ModelUsage { model, tokens }).ok();
-            settle(services, &principal, &request, held, actual).await;
+            settle(services, &principal, &request, &hold_id, held, actual).await;
             count(services, watch, false, services.clock().now());
         }
         None if ended => {
@@ -130,7 +132,7 @@ pub(crate) async fn relay<S: Services>(
                     at: services.clock().now(),
                 });
             }
-            release(services, &principal, &request).await;
+            release(services, &principal, &request, &hold_id).await;
             count(services, watch, false, services.clock().now());
         }
     }
@@ -177,6 +179,7 @@ async fn settle<S: Services>(
     services: &S,
     principal: &Principal,
     request: &RequestId,
+    hold_id: &HoldId,
     held: Money,
     actual: Option<Money>,
 ) {
@@ -204,29 +207,17 @@ async fn settle<S: Services>(
         Stage::Settle,
         principal,
         request,
-        Accepted::OnRetry(BillingRejection::AlreadySettled),
-        || wallet.settle(&principal.account, request, amount),
+        BillingRejection::AlreadySettled,
+        || wallet.settle(&principal.account, request, hold_id, amount),
     )
     .await;
 }
 
-async fn release<S: Services>(services: &S, principal: &Principal, request: &RequestId) {
-    let wallet = services.wallet();
-    retry(
-        services,
-        Stage::Release,
-        principal,
-        request,
-        Accepted::OnRetry(BillingRejection::AlreadyReleased),
-        || wallet.release(&principal.account, request),
-    )
-    .await;
-}
-
-pub(crate) async fn release_unconfirmed<S: Services>(
+async fn release<S: Services>(
     services: &S,
     principal: &Principal,
     request: &RequestId,
+    hold_id: &HoldId,
 ) {
     let wallet = services.wallet();
     retry(
@@ -234,28 +225,10 @@ pub(crate) async fn release_unconfirmed<S: Services>(
         Stage::Release,
         principal,
         request,
-        Accepted::UnconfirmedHold,
-        || wallet.release(&principal.account, request),
+        BillingRejection::AlreadyReleased,
+        || wallet.release(&principal.account, request, hold_id),
     )
     .await;
-}
-
-#[derive(Clone, Copy)]
-enum Accepted {
-    OnRetry(BillingRejection),
-    UnconfirmedHold,
-}
-
-impl Accepted {
-    fn accepts(self, attempts: u32, rejection: BillingRejection) -> bool {
-        match self {
-            Self::OnRetry(done) => attempts > 1 && rejection == done,
-            Self::UnconfirmedHold => matches!(
-                rejection,
-                BillingRejection::HoldNotFound | BillingRejection::AlreadyReleased
-            ),
-        }
-    }
 }
 
 async fn retry<S, F, Fut, E>(
@@ -263,7 +236,7 @@ async fn retry<S, F, Fut, E>(
     stage: Stage,
     principal: &Principal,
     request: &RequestId,
-    accepted: Accepted,
+    accepted: BillingRejection,
     mut attempt: F,
 ) where
     S: Services,
@@ -276,7 +249,7 @@ async fn retry<S, F, Fut, E>(
     loop {
         match attempt().await {
             Ok(()) => return,
-            Err(WalletError::Rejected(rejection)) if accepted.accepts(attempts, rejection) => {
+            Err(WalletError::Rejected(rejection)) if attempts > 1 && rejection == accepted => {
                 return;
             }
             Err(WalletError::Rejected(rejection)) => {

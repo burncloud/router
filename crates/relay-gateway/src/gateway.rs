@@ -20,7 +20,7 @@ use crate::error::GatewayError;
 use crate::period::since;
 use crate::ports::{Fault, PriceSource, Report, RequestIds, Spawn, Stage};
 use crate::ratio::{UnreadableThreshold, Watch};
-use crate::task::{relay, release_unconfirmed, Job};
+use crate::task::{relay, Job};
 
 /// `Idempotency-Key` 的最大字节数。
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
@@ -184,7 +184,15 @@ fn hold_failure<S: Services>(
         WalletError::Rejected(BillingRejection::CurrencyMismatch) => {
             Some(Rejection::CurrencyMismatch.into())
         }
-        WalletError::Rejected(other) => Some(GatewayError::Billing(*other)),
+        WalletError::Rejected(
+            reason @ (BillingRejection::HoldNotFound
+            | BillingRejection::SettlementExceedsHold
+            | BillingRejection::AlreadySettled
+            | BillingRejection::AlreadyReleased
+            | BillingRejection::Unbalanced
+            | BillingRejection::Overflow
+            | BillingRejection::HoldMismatch),
+        ) => Some(GatewayError::Billing(*reason)),
         WalletError::Storage(_) => None,
     }
 }
@@ -221,18 +229,20 @@ impl<S: Services> Gateway for RelayGateway<S> {
             return Err(GatewayError::ZeroPrice);
         }
         let account: &AccountId = &principal.account;
-        if let Err(error) = services
+        let hold_id = match services
             .wallet()
             .hold(account, &request, &principal.key, cap, held)
             .await
         {
-            if let Some(failure) = hold_failure::<S>(&error) {
-                return Err(failure);
+            Ok(hold_id) => hold_id,
+            Err(error) => {
+                if let Some(failure) = hold_failure::<S>(&error) {
+                    return Err(failure);
+                }
+                self.fault(Stage::Hold, Some(&principal), &error);
+                return Err(GatewayError::Storage);
             }
-            self.fault(Stage::Hold, Some(&principal), &error);
-            release_unconfirmed(services, &principal, &request).await;
-            return Err(GatewayError::Storage);
-        }
+        };
         let (sender, mut receiver) = channel(services.config().channel_capacity);
         let streaming = prepared.streaming;
         services.spawner().spawn(relay(
@@ -241,6 +251,7 @@ impl<S: Services> Gateway for RelayGateway<S> {
             Job {
                 principal,
                 request,
+                hold_id,
                 held,
                 model: prepared.limit.model,
                 upstream_body: prepared.upstream_body,
