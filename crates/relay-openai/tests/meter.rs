@@ -438,3 +438,17 @@ proptest! {
         prop_assert!(whole_result.is_err());
     }
 }
+
+#[test]
+fn usage_integers_beyond_u64_are_invalid() {
+    let too_big = "18446744073709551616";
+    let usage = usage_with(&["prompt_tokens"], &serde_json::from_str(too_big).unwrap());
+    assert!(usage.contains(too_big), "{usage}");
+    let event = usage_chunk(&usage);
+    let bytes = sse(&[&event, "[DONE]"], "\n\n");
+    assert_eq!(stream(&bytes), (true, Err(MeterError::InvalidUsage)));
+    assert_eq!(
+        whole(&completion(&usage)),
+        (true, Err(MeterError::InvalidUsage))
+    );
+}

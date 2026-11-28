@@ -308,3 +308,59 @@ fn error_messages_do_not_echo_the_request() {
     let error = rejected(&json!({"model": "secret-model-name"}));
     assert!(!error.to_string().contains("secret"));
 }
+
+#[test]
+fn upstream_body_keeps_key_order_and_large_integers() {
+    let tools = r#"{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"zebra":{"type":"string"},"alpha":{"type":"integer"}},"required":["zebra","alpha"]}}}"#;
+    let format = r#"{"type":"json_schema","json_schema":{"name":"out","strict":true,"schema":{"type":"object","properties":{"last":{"type":"string"},"first":{"type":"string"}},"required":["last","first"]}}}"#;
+    let messages = r#"[{"role":"user","content":"Say hello."}]"#;
+
+    let no_stream = format!(
+        r#"{{"model":"gpt-4o-mini","messages":{messages},"tools":[{tools}],"response_format":{format},"temperature":0.25,"seed":18446744073709551616,"also":9007199254740993,"user":"u-1"}}"#
+    );
+    let expected_no_stream = format!(
+        r#"{{"model":"gpt-4o-mini","messages":{messages},"tools":[{tools}],"response_format":{format},"temperature":0.25,"seed":18446744073709551616,"also":9007199254740993,"user":"u-1","service_tier":"default"}}"#
+    );
+    assert_eq!(
+        chat().prepare(no_stream.as_bytes()).unwrap().upstream_body,
+        expected_no_stream.as_bytes()
+    );
+
+    let with_options = format!(
+        r#"{{"model":"gpt-4o-mini","messages":{messages},"stream":true,"stream_options":{{"include_usage":false,"include_obfuscation":false}},"tools":[{tools}],"response_format":{format},"max_tokens":20,"seed":-9223372036854775809}}"#
+    );
+    let expected_with_options = format!(
+        r#"{{"model":"gpt-4o-mini","messages":{messages},"stream":true,"stream_options":{{"include_usage":true,"include_obfuscation":false}},"tools":[{tools}],"response_format":{format},"max_tokens":20,"seed":-9223372036854775809,"service_tier":"default"}}"#
+    );
+    assert_eq!(
+        chat()
+            .prepare(with_options.as_bytes())
+            .unwrap()
+            .upstream_body,
+        expected_with_options.as_bytes()
+    );
+
+    let tier_already = format!(
+        r#"{{"model":"gpt-4o-mini","service_tier":"default","messages":{messages},"stream":true,"seed":1e2}}"#
+    );
+    let expected_tier_already = format!(
+        r#"{{"model":"gpt-4o-mini","service_tier":"default","messages":{messages},"stream":true,"seed":1e+2,"stream_options":{{"include_usage":true}}}}"#
+    );
+    assert_eq!(
+        chat()
+            .prepare(tier_already.as_bytes())
+            .unwrap()
+            .upstream_body,
+        expected_tier_already.as_bytes()
+    );
+}
+
+#[test]
+fn pretty_printed_request_is_rewritten_compact_with_the_same_key_order() {
+    let body = "{\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [{\"role\": \"user\", \"content\": \"Say hello.\"}],\n  \"seed\": 18446744073709551616\n}";
+    let expected = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Say hello."}],"seed":18446744073709551616,"service_tier":"default"}"#;
+    assert_eq!(
+        chat().prepare(body.as_bytes()).unwrap().upstream_body,
+        expected.as_bytes()
+    );
+}
