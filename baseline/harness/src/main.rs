@@ -254,7 +254,7 @@ fn stream_scenarios() -> Vec<Scn> {
             disconnect_after_first_chunk: true,
             ..main_scenario(
                 "openai_stream_client_disconnect",
-                Some("预期不同：旧系统客户端断开后也断开上游、记 0；新系统继续读完上游按实际用量结算，上游自己中断、没有用量时释放冻结、不扣。初步实测 OpenAI 对中途断开未按完整回答计费，读完则按完整回答计费，所以新系统读完并按真实用量收费是有意的产品规则"),
+                Some("预期不同：旧系统客户端断开后也断开上游、记 0；新系统继续读完上游按实际用量结算，上游自己中断、没有用量时释放冻结、不扣。用量后台已确认 OpenAI 中途断开不计费，读完则按完整回答计费，所以新系统读完并按真实用量收费是有意的产品规则"),
                 chat("gpt-long", true),
             )
         },
