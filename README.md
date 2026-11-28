@@ -20,7 +20,7 @@ BurnCloud 的模型中转。按 [burncloud/next](https://github.com/burncloud/ne
 
 - 拒绝显式写了非 `default` 的 `service_tier`、`n` 不等于 1、`modalities` 含非 `text`、带 `audio`、`prediction` 或 `web_search_options`、消息里有非文本的 content part、请求的最大输出超过模型上限、`max_completion_tokens` 和 `max_tokens` 同时出现。每种拒绝都有固定的错误码（`PrepareError::code`）。
 - 冻结上限：输入取请求体字节数，缓存命中取 0，输出依次取 `max_completion_tokens`、`max_tokens`、模型的最大输出。
-- 发给上游的请求体只改两处：一律写入 `"service_tier": "default"`；流式请求把 `stream_options.include_usage` 设为 `true`。其余字段原样保留。
+- 发给上游的请求体只改两处：一律写入 `"service_tier": "default"`（原来没有这个字段时加在对象末尾，已有则就地改值）；流式请求把 `stream_options.include_usage` 设为 `true`（原来没有 `stream_options` 时加在对象末尾）。对象的 key 顺序（含嵌套对象，例如工具参数和 `response_format` 的 `json_schema` properties）保持原请求的顺序，不按字母重排。超出 `u64`/`i64` 的整数按数字原文透传，不会变成浮点。科学计数法会写成 `serde_json` 的规范形式（例如 `1e2` 变成 `1e+2`）。重新序列化后是紧凑 JSON，空白和 Unicode 转义会按 `serde_json` 的规则重写，不是整份请求体逐字节原样复制。
 
 `UsageMeter`：
 

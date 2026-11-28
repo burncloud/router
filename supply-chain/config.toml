@@ -23,9 +23,25 @@ criteria = "safe-to-run"
 version = "0.10.2"
 criteria = "safe-to-run"
 
+[[exemptions.equivalent]]
+version = "1.0.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.foldhash]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.getrandom]]
 version = "0.4.3"
 criteria = "safe-to-run"
+
+[[exemptions.hashbrown]]
+version = "0.17.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.indexmap]]
+version = "2.14.2"
+criteria = "safe-to-deploy"
 
 [[exemptions.itoa]]
 version = "1.0.19"
